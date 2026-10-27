@@ -2089,7 +2089,7 @@ password. All of these options come from their similarly-named [Django settings]
 #### [`PAPERLESS_REMOTE_OCR_ENGINE=<str>`](#PAPERLESS_REMOTE_OCR_ENGINE) {#PAPERLESS_REMOTE_OCR_ENGINE}
 
 : The remote OCR engine to use: `azureai` for Azure AI Document Intelligence or
-  `llamaparse` for LlamaParse.
+`llamaparse` for LlamaParse.
 
     Defaults to None, which disables remote OCR.
 
@@ -2102,7 +2102,7 @@ password. All of these options come from their similarly-named [Django settings]
 #### [`PAPERLESS_REMOTE_OCR_ENDPOINT=<str>`](#PAPERLESS_REMOTE_OCR_ENDPOINT) {#PAPERLESS_REMOTE_OCR_ENDPOINT}
 
 : The endpoint to use for the remote OCR engine. This is required for Azure AI.
-  LlamaParse uses `https://api.cloud.llamaindex.ai` when no endpoint is supplied.
+LlamaParse uses `https://api.cloud.llamaindex.ai` when no endpoint is supplied.
 
     Defaults to None.
 

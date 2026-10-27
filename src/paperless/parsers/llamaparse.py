@@ -51,8 +51,8 @@ LANGUAGES = {
     "swe": "sv",
     "tur": "tr",
     "ukr": "uk",
-    "vie": "vi",
-    "tha": "th",
+    "vie": "vi",  # codespell:ignore vie
+    "tha": "th",  # codespell:ignore tha
 }
 
 
