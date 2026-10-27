@@ -423,7 +423,7 @@ class TestRetaggerStoragePath(DirectoriesMixin):
 
 
 @pytest.mark.management
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True, reset_sequences=True)
 class TestRetaggerIdRange(DirectoriesMixin):
     @pytest.mark.usefixtures("documents")
     @pytest.mark.parametrize(
