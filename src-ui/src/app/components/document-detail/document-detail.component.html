@@ -79,7 +79,7 @@
         <i-bs width="1em" height="1em" name="diagram-3" class="me-1"></i-bs><span i18n>More like this</span>
       </button>
 
-      <button ngbDropdownItem (click)="editPdf()" [disabled]="!userIsOwner || !userCanEdit || originalContentRenderType !== ContentRenderType.PDF">
+      <button ngbDropdownItem (click)="editPdf()" [disabled]="!userCanEdit || archiveContentRenderType !== ContentRenderType.PDF">
         <i-bs name="pencil" class="me-1"></i-bs><ng-container i18n>PDF Editor</ng-container>
       </button>
 

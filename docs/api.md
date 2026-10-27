@@ -240,8 +240,11 @@ The custom branch adds two multipart endpoints:
 - `POST /api/documents/{id}/replace_file/`: OCR an uploaded PDF or image and use
   it as this document's current file.
 
-Both accept `document`, `keep_only_current_file` (default `true`) and
-`remote_ocr` (default `false`). They return a consumption task UUID. The
+Both accept `document`, `keep_only_current_file` (defaulting to
+`PAPERLESS_STORE_ONLY_CURRENT_FILE`) and optional `remote_ocr`. Set
+`remote_ocr=true` to request the configured remote parser, `false` to use a
+local parser, or omit it to follow the configured remote OCR mode. They
+return a consumption task UUID. The
 completed task references the existing root document ID. Title, dates, ASN,
 owner, permissions, tags, custom fields, notes and share links stay attached to
 that document. The configured native parser handles only the new scan;
@@ -255,10 +258,34 @@ object-level change and delete permissions are required. With `false`, change
 permission is enough and the combined or replacement PDF is retained as an
 additional version. Permissions are checked again after OCR finishes.
 
-In the document dashboard, open **Versions**, select **Append pages to this
-document** or **Replace this document's file**, and upload the scan. Keeping
-only the current file requires an explicit acknowledgement of history removal.
-The ordinary **Add a file version** action remains available.
+Append additionally accepts `operations`, a JSON array of page operations
+applied to the existing searchable PDF before the new scan is added. Page
+numbers start at one; omitted pages are removed. Each operation accepts
+`page` and optional `rotate` (a multiple of 90). Append produces one output,
+so `doc` must be zero or omitted. An empty array retains no existing pages.
+Without `operations`, all existing pages are retained.
+
+`source_mode` defaults to `latest_version`; `explicit_selection` uses
+`source_document_id` (the root or a version belonging to it). Supply
+`source_checksum` from that version's `archive_checksum`, or `checksum` when
+there is no archive. The editor uses these fields to reject stale edits.
+Queued editor operations also reject a change to the current file while the
+operation was waiting or performing OCR.
+
+`POST /api/documents/edit_pdf/` supports `keep_only_current_file` and
+`source_checksum` with `update_document=true`. It applies the same storage
+and permission rules, preserves root metadata, extracts text from the edited
+searchable PDF, and regenerates its thumbnail without OCR. The response is
+`{"result":"OK","task_id":"<uuid>"}`; poll the ordinary tasks endpoint
+until the job succeeds or fails. Split/create operations retain the upstream
+behavior and return `{"result":"OK"}`.
+
+In the document dashboard, open **Actions → PDF Editor** for appending and
+page edits. Select the new scan and its OCR mode, then choose file retention.
+Splitting creates new document IDs and cannot be combined with appending.
+**Versions → Replace this document's file** supports replacement. Keeping
+only the current file requires an explicit acknowledgement of history
+removal. The ordinary **Add a file version** action remains available.
 
 ## Permissions
 

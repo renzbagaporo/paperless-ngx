@@ -1211,6 +1211,42 @@ class TestConsumerCreatedDate(DirectoriesMixin, GetConsumerMixin, TestCase):
     def setUp(self) -> None:
         super().setUp()
 
+    @override_settings(OCR_VALIDATE_PRINTED_DATES=True)
+    def test_verified_printed_date_and_explicit_override(self) -> None:
+        from documents.ingestion_checks import collect_ingestion_checks
+
+        source = (
+            Path(__file__).parent
+            / "samples"
+            / "documents"
+            / "originals"
+            / "0000005.pdf"
+        )
+        for explicit in (None, datetime.datetime(2020, 1, 2, tzinfo=datetime.UTC)):
+            target = self.dirs.scratch_dir / "sample.pdf"
+            shutil.copy(source, target)
+            with (
+                mock.patch(
+                    "documents.consumer.collect_ingestion_checks",
+                    side_effect=lambda parser, text: collect_ingestion_checks(
+                        parser,
+                        "発行日: 令和六年六月二十八日",
+                    ),
+                ),
+                self.get_consumer(
+                    target,
+                    overrides=DocumentMetadataOverrides(created=explicit),
+                ) as consumer,
+            ):
+                consumer.run()
+            document = Document.objects.latest("pk")
+            self.assertEqual(
+                document.created,
+                explicit.date() if explicit else datetime.date(2024, 6, 28),
+            )
+            # The second import uses the same scan, with a clean isolated DB row.
+            document.delete()
+
     def test_consume_date_from_content(self) -> None:
         """
         GIVEN:

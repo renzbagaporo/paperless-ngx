@@ -27,6 +27,8 @@ from documents.file_handling import create_source_path_directory
 from documents.file_handling import generate_filename
 from documents.file_handling import generate_unique_filename
 from documents.file_handling import validate_path_in_root
+from documents.ingestion_checks import apply_ingestion_checks
+from documents.ingestion_checks import collect_ingestion_checks
 from documents.loggers import LoggingMixin
 from documents.models import Correspondent
 from documents.models import CustomField
@@ -566,6 +568,17 @@ class ConsumerPlugin(
                         )
                         with get_date_parser() as date_parser:
                             date = next(date_parser.parse(self.filename, text), None)
+                    ingestion_checks = collect_ingestion_checks(document_parser, text)
+                    if (
+                        ingestion_checks.printed_date is not None
+                        and self.metadata.created is None
+                    ):
+                        date = timezone.make_aware(
+                            datetime.datetime.combine(
+                                ingestion_checks.printed_date,
+                                datetime.time.min,
+                            ),
+                        )
                     archive_path = document_parser.get_archive_path()
                     page_count = document_parser.get_page_count(
                         self.working_copy,
@@ -680,6 +693,11 @@ class ConsumerPlugin(
 
                         document = Document.objects.prefetch_related("versions").get(
                             pk=document.pk,
+                        )
+
+                        apply_ingestion_checks(
+                            document.root_document or document,
+                            ingestion_checks,
                         )
 
                         document_consumption_finished.send(

@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import shutil
 import tempfile
+import uuid
+from contextlib import ExitStack
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -25,8 +27,10 @@ from documents.caching import clear_document_caches
 from documents.file_handling import generate_unique_filename
 from documents.file_handling import validate_path_in_root
 from documents.models import Document
+from documents.parsers import make_thumbnail_from_pdf
 from documents.signals import document_updated
 from documents.utils import compute_checksum
+from documents.utils import run_subprocess
 from documents.versioning import get_latest_version_for_root
 from paperless.config import RemoteOCRConfig
 from paperless.parsers import ParserContext
@@ -213,7 +217,15 @@ def _install(
     }
     Document.objects.filter(pk=target.pk).update(**updates)
     if keep_only_current_file:
-        Document.objects.filter(pk__in=old_ids).delete()
+        # Hide obsolete children in this transaction without model save signals:
+        # native soft deletion saves each row and its rename receiver takes
+        # MEDIA_LOCK again. Normal hard deletion/cascades run after commit,
+        # outside the media lock, before the guarded file cleanup below.
+        Document.global_objects.filter(pk__in=old_ids).update(
+            deleted_at=timezone.now(),
+            restored_at=None,
+            transaction_id=uuid.uuid4(),
+        )
     else:
         Document.objects.filter(pk=root.pk).update(modified=timezone.now())
     if settings.AUDIT_LOG_ENABLED:
@@ -277,20 +289,101 @@ def check_file_update_permissions(
         )
 
 
+def resolve_file_update_source(
+    root: Document,
+    source_document_id: int | None = None,
+    source_mode: str = "latest_version",
+) -> Document:
+    """Match native source selection while restricting explicit versions to this root."""
+    if source_mode not in {"latest_version", "explicit_selection"}:
+        raise ValueError("Unknown source_mode.")
+    selected = root
+    if source_document_id is not None:
+        selected = Document.objects.get(pk=source_document_id)
+        if (selected.root_document_id or selected.pk) != root.pk:
+            raise ValueError("The selected version belongs to another document.")
+    if source_mode == "explicit_selection" or selected.pk != root.pk:
+        return selected
+    return get_latest_version_for_root(root)
+
+
+def searchable_checksum(document: Document) -> str:
+    return document.archive_checksum or document.checksum
+
+
+def _checked_source(
+    root,
+    source_document_id,
+    source_mode,
+    source_checksum,
+    expected_current_document_id,
+    expected_current_checksum,
+):
+    current = get_latest_version_for_root(root)
+    selected = resolve_file_update_source(root, source_document_id, source_mode)
+    if (
+        expected_current_document_id is not None
+        and (
+            current.pk != expected_current_document_id
+            or searchable_checksum(current) != expected_current_checksum
+        )
+    ) or (
+        source_checksum is not None and searchable_checksum(selected) != source_checksum
+    ):
+        raise ValueError("The document file changed. Reload the editor before saving.")
+    return selected
+
+
+def _edit_pdf_pages(source: Path, target: Path, operations: list[dict]) -> None:
+    with pikepdf.open(source) as original, pikepdf.new() as edited:
+        for operation in operations:
+            page = operation["page"]
+            rotation = operation.get("rotate", 0)
+            if operation.get("doc", 0) != 0:
+                raise ValueError("Multiple output documents specified.")
+            if not isinstance(page, int) or not 1 <= page <= len(original.pages):
+                raise ValueError("Page is out of bounds.")
+            if not isinstance(rotation, int) or rotation % 90:
+                raise ValueError("Rotation must be a multiple of 90 degrees.")
+            edited.pages.append(original.pages[page - 1])
+            if rotation:
+                edited.pages[-1].rotate(rotation, relative=True)
+        edited.remove_unreferenced_resources()
+        edited.save(target)
+
+
+def _edited_pdf_text(source: Path, work: Path) -> str:
+    """Extract the retained text layer; PDF edits never run an OCR engine."""
+    output = work / "edited_text.txt"
+    run_subprocess(
+        ["pdftotext", "-q", "-layout", "-enc", "UTF-8", str(source), str(output)],
+        logger=logger,
+    )
+    return output.read_text(encoding="utf-8", errors="replace").strip()
+
+
 def update_file(
     root_id: int,
-    uploaded_file: Path,
+    uploaded_file: Path | None,
     *,
     append: bool,
     keep_only_current_file: bool,
-    remote_ocr: bool = False,
+    remote_ocr: bool | None = None,
     user_id: int | None = None,
+    operations: list[dict] | None = None,
+    source_document_id: int | None = None,
+    source_mode: str = "latest_version",
+    source_checksum: str | None = None,
+    expected_current_document_id: int | None = None,
+    expected_current_checksum: str | None = None,
 ) -> dict[str, int]:
     from django.contrib.auth import get_user_model
 
-    mime_type = magic.from_file(uploaded_file, mime=True)
-    if mime_type not in SUPPORTED_UPLOAD_TYPES:
+    mime_type = magic.from_file(uploaded_file, mime=True) if uploaded_file else None
+    if uploaded_file and mime_type not in SUPPORTED_UPLOAD_TYPES:
         raise ValueError("Upload a PDF or supported image file.")
+    if uploaded_file is None and not operations:
+        raise ValueError("At least one output page is required.")
     lock_path = settings.DATA_DIR / f"document-file-{root_id}.lock"
     with FileLock(lock_path):
         root = Document.objects.get(pk=root_id, root_document__isnull=True)
@@ -301,27 +394,49 @@ def update_file(
                 user,
                 keep_only_current_file=keep_only_current_file,
             )
-        parser_class = get_parser_registry().get_parser_for_file(
-            mime_type,
-            uploaded_file.name,
-            uploaded_file,
-            allow_remote=remote_ocr or RemoteOCRConfig().remote_ocr_by_default,
+        _checked_source(
+            root,
+            source_document_id,
+            source_mode,
+            source_checksum,
+            expected_current_document_id,
+            expected_current_checksum,
         )
-        if parser_class is None:
-            raise ValueError("No parser is available for this file.")
-        with (
-            parser_class() as parser,
-            tempfile.TemporaryDirectory(dir=settings.SCRATCH_DIR) as temporary,
-        ):
-            work = Path(temporary)
-            parser.configure(ParserContext())
-            parser.parse(uploaded_file, mime_type, produce_archive=True)
-            parsed = parser.get_archive_path()
-            new_pdf = (
-                Path(parsed) if parsed else _pdf_source(uploaded_file, mime_type, work)
+        with ExitStack() as stack:
+            work = Path(
+                stack.enter_context(
+                    tempfile.TemporaryDirectory(dir=settings.SCRATCH_DIR),
+                ),
             )
-            new_text = parser.get_text()
-            new_thumbnail = parser.get_thumbnail(uploaded_file, mime_type)
+            new_pdf = None
+            new_text = ""
+            new_thumbnail = None
+            checks = None
+            if uploaded_file:
+                parser_class = get_parser_registry().get_parser_for_file(
+                    mime_type,
+                    uploaded_file.name,
+                    uploaded_file,
+                    allow_remote=RemoteOCRConfig().remote_ocr_by_default
+                    if remote_ocr is None
+                    else remote_ocr,
+                )
+                if parser_class is None:
+                    raise ValueError("No parser is available for this file.")
+                parser = stack.enter_context(parser_class())
+                parser.configure(ParserContext())
+                parser.parse(uploaded_file, mime_type, produce_archive=True)
+                parsed = parser.get_archive_path()
+                new_pdf = (
+                    Path(parsed)
+                    if parsed
+                    else _pdf_source(uploaded_file, mime_type, work)
+                )
+                new_text = parser.get_text()
+                from documents.ingestion_checks import collect_ingestion_checks
+
+                checks = collect_ingestion_checks(parser, new_text)
+                new_thumbnail = parser.get_thumbnail(uploaded_file, mime_type)
             with _atomic_file_update() as rollback:
                 root = Document.objects.select_for_update().get(
                     pk=root_id,
@@ -336,11 +451,19 @@ def update_file(
                         keep_only_current_file=keep_only_current_file,
                     )
                 with FileLock(settings.MEDIA_LOCK):
-                    latest = get_latest_version_for_root(root)
+                    latest = _checked_source(
+                        root,
+                        source_document_id,
+                        source_mode,
+                        source_checksum,
+                        expected_current_document_id,
+                        expected_current_checksum,
+                    )
                     result = new_pdf
                     text = new_text
-                    thumbnail = Path(new_thumbnail)
-                    if append:
+                    thumbnail = Path(new_thumbnail) if new_thumbnail else None
+                    retained_count = 0
+                    if append or uploaded_file is None:
                         current = latest.archive_path or latest.source_path
                         current_mime = (
                             "application/pdf"
@@ -348,20 +471,37 @@ def update_file(
                             else latest.mime_type
                         )
                         current = _pdf_source(current, current_mime, work)
-                        result = work / "appended.pdf"
-                        with (
-                            pikepdf.open(current) as existing,
-                            pikepdf.open(new_pdf) as added,
-                        ):
-                            existing.pages.extend(added.pages)
-                            existing.save(result)
-                        text = "\n\n".join(
-                            value for value in (latest.content, new_text) if value
-                        )
-                        thumbnail = latest.thumbnail_path
+                        if operations is not None:
+                            edited = work / "edited.pdf"
+                            _edit_pdf_pages(current, edited, operations)
+                            current = edited
+                        with pikepdf.open(current) as retained:
+                            retained_count = len(retained.pages)
+                        if uploaded_file is None:
+                            result = current
+                        else:
+                            result = work / "appended.pdf"
+                            with (
+                                pikepdf.open(current) as existing,
+                                pikepdf.open(new_pdf) as added,
+                            ):
+                                existing.pages.extend(added.pages)
+                                existing.save(result)
+                        if operations is None:
+                            text = "\n\n".join(
+                                value for value in (latest.content, new_text) if value
+                            )
+                            thumbnail = latest.thumbnail_path
+                        else:
+                            text = _edited_pdf_text(result, work)
+                            thumbnail = make_thumbnail_from_pdf(result, work)
                     with pikepdf.open(result) as document_pdf:
                         count = len(document_pdf.pages)
-                    name = root.original_filename if append else uploaded_file.name
+                    name = (
+                        root.original_filename
+                        if append or uploaded_file is None
+                        else uploaded_file.name
+                    )
                     _install(
                         root,
                         result,
@@ -370,10 +510,21 @@ def update_file(
                         page_count=count,
                         filename=str(Path(name or "document.pdf").with_suffix(".pdf")),
                         keep_only_current_file=keep_only_current_file,
-                        reason="Pages appended" if append else "File replaced",
+                        reason="PDF edited"
+                        if uploaded_file is None
+                        else ("Pages appended" if append else "File replaced"),
                         rollback=rollback,
                         actor=user,
                     )
+                    if checks is not None:
+                        from documents.ingestion_checks import apply_ingestion_checks
+
+                        apply_ingestion_checks(
+                            root,
+                            checks,
+                            page_offset=retained_count,
+                            preserve_metadata=True,
+                        )
     return {"document_id": root_id}
 
 

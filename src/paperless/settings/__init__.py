@@ -85,6 +85,12 @@ EMPTY_TRASH_DIR = (
 # Explicit storage policy: retain the current searchable file on the root only.
 STORE_ONLY_CURRENT_FILE = get_bool_from_env("PAPERLESS_STORE_ONLY_CURRENT_FILE")
 
+# Local, advisory checks: they never request another AI model call.
+OCR_VALIDATE_PRINTED_DATES = get_bool_from_env("PAPERLESS_OCR_VALIDATE_PRINTED_DATES")
+OCR_REVIEW_CROSS_PAGE_NUMBERS = get_bool_from_env(
+    "PAPERLESS_OCR_REVIEW_CROSS_PAGE_NUMBERS",
+)
+
 MEDIA_LOCK = MEDIA_ROOT / "media.lock"
 INDEX_DIR = DATA_DIR / "index"
 

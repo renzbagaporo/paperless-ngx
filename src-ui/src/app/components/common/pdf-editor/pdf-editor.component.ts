@@ -55,6 +55,54 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
   )
   deleteOriginal: boolean = false
   includeMetadata: boolean = true
+  canRemoveEarlierFiles = false
+  keepOnlyCurrentFile = false
+  fileRemovalConfirmed = false
+  appendFile: File | null = null
+  remoteOcr = false
+
+  configureRetention(canDelete: boolean) {
+    this.canRemoveEarlierFiles = canDelete
+    this.keepOnlyCurrentFile = canDelete
+  }
+
+  onAppendFileSelected(event: Event) {
+    const input = event.target as HTMLInputElement
+    const file = input.files?.[0]
+    input.value = ''
+    if (!file || this.hasSplit() || !this.buttonsEnabled()) return
+    this.appendFile = file
+    this.editMode = PdfEditorEditMode.Update
+  }
+
+  removeAppendFile() {
+    this.appendFile = null
+  }
+
+  get canSubmit(): boolean {
+    return (
+      this.buttonsEnabled() &&
+      (this.pages.length > 0 || !!this.appendFile) &&
+      !(
+        this.appendFile &&
+        (this.hasSplit() || this.editMode !== PdfEditorEditMode.Update)
+      ) &&
+      !(
+        this.editMode === PdfEditorEditMode.Update &&
+        this.keepOnlyCurrentFile &&
+        (!this.canRemoveEarlierFiles || !this.fileRemovalConfirmed)
+      ) &&
+      !(
+        this.editMode === PdfEditorEditMode.Create &&
+        this.deleteOriginal &&
+        !this.canRemoveEarlierFiles
+      )
+    )
+  }
+
+  override confirm() {
+    if (this.canSubmit) super.confirm()
+  }
 
   get pdfSrc(): string {
     return this.documentService.getPreviewUrl(
@@ -97,6 +145,7 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
   }
 
   toggleSplit(i: number) {
+    if (this.appendFile) return
     this.pages[i].splitAfter = !this.pages[i].splitAfter
     if (this.pages[i].splitAfter) {
       // force create mode

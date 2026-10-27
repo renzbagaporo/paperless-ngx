@@ -5,7 +5,7 @@ RUN npm install --global pnpm@11.15.1
 COPY src-ui/package.json src-ui/pnpm-lock.yaml src-ui/pnpm-workspace.yaml src-ui/.npmrc ./
 RUN pnpm install --frozen-lockfile
 COPY src-ui ./
-RUN pnpm exec ng build --configuration production
+RUN node node_modules/@angular/cli/bin/ng.js build --configuration production
 
 # Keep upstream's tested runtime/dependencies and layer this fork's application on it.
 FROM ghcr.io/paperless-ngx/paperless-ngx:3.3.4@sha256:9bc6e8248891bcfa6f52fffe8b81e4ea8cae75790c3ec1b9906961a7ba55c969

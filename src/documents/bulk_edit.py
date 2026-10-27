@@ -901,11 +901,13 @@ def edit_pdf(
     *,
     delete_original: bool = False,
     update_document: bool = False,
+    keep_only_current_file: bool | None = None,
+    source_checksum: str | None = None,
     include_metadata: bool = True,
     source_mode: SourceMode = SourceModeChoices.LATEST_VERSION,
     user: User | None = None,
     trigger_source: PaperlessTask.TriggerSource = PaperlessTask.TriggerSource.WEB_UI,
-) -> Literal["OK"]:
+) -> Literal["OK"] | dict[str, str]:
     """
     Operations is a list of dictionaries describing the final PDF pages.
     Each entry must contain the original page number in `page` and may
@@ -919,6 +921,54 @@ def edit_pdf(
     )
     doc = Document.objects.select_related("root_document").get(id=doc_ids[0])
     pair = _resolve_root_and_source_doc(doc, source_mode=source_mode)
+    if update_document:
+        from documents.file_updates import check_file_update_permissions
+        from documents.file_updates import searchable_checksum
+        from documents.tasks import update_document_file
+
+        if not operations or any(
+            operation.get("doc", 0) != 0 for operation in operations
+        ):
+            logger.error("Update requires a single non-empty output document")
+            raise ValueError("Update requires a single non-empty output document.")
+        keep_only = (
+            settings.STORE_ONLY_CURRENT_FILE
+            if keep_only_current_file is None
+            else keep_only_current_file
+        )
+        if user is not None:
+            check_file_update_permissions(
+                pair.root_doc,
+                user,
+                keep_only_current_file=keep_only,
+            )
+        expected_checksum = searchable_checksum(pair.source_doc)
+        current = get_latest_version_for_root(pair.root_doc)
+        if source_checksum is not None and source_checksum != expected_checksum:
+            raise ValueError(
+                "The document file changed. Reload the editor before saving.",
+            )
+        task = update_document_file.apply_async(
+            kwargs={
+                "input_doc": ConsumableDocument(
+                    source=DocumentSource.ApiUpload,
+                    original_file=pair.source_doc.source_path,
+                    root_document_id=pair.root_doc.pk,
+                ),
+                "append": False,
+                "edit_only": True,
+                "operations": operations,
+                "source_document_id": pair.source_doc.pk,
+                "source_mode": SourceModeChoices.EXPLICIT_SELECTION,
+                "source_checksum": expected_checksum,
+                "expected_current_document_id": current.pk,
+                "expected_current_checksum": searchable_checksum(current),
+                "keep_only_current_file": keep_only,
+                "user_id": user.pk if user is not None else None,
+            },
+            headers={"trigger_source": trigger_source},
+        )
+        return {"result": "OK", "task_id": task.id}
     import pikepdf
 
     pdf_docs: list[pikepdf.Pdf] = []
@@ -928,12 +978,6 @@ def edit_pdf(
             raise ValueError("Output document index is out of bounds")
 
         max_idx = max(op.get("doc", 0) for op in operations)
-        if update_document and max_idx > 0:
-            logger.error(
-                "Update requested but multiple output documents specified",
-            )
-            raise ValueError("Multiple output documents specified")
-
         if any(
             op.get("doc", 0) < 0 or op.get("doc", 0) >= len(operations)
             for op in operations
@@ -951,79 +995,50 @@ def edit_pdf(
                 if op.get("rotate"):
                     dst.pages[-1].rotate(op["rotate"], relative=True)
 
-        if update_document:
-            # Create a new version from the edited PDF rather than replacing in-place
-            pdf = pdf_docs[0]
-            pdf.remove_unreferenced_resources()
-            filepath: Path = (
+        consume_tasks = []
+        overrides = (
+            DocumentMetadataOverrides().from_document(pair.root_doc)
+            if include_metadata
+            else DocumentMetadataOverrides()
+        )
+        if user is not None:
+            overrides.owner_id = user.id
+            overrides.actor_id = user.id
+        if not delete_original:
+            overrides.skip_asn_if_exists = True
+        if delete_original and len(pdf_docs) == 1:
+            overrides.asn = pair.root_doc.archive_serial_number
+        for idx, pdf in enumerate(pdf_docs, start=1):
+            version_filepath: Path = (
                 Path(tempfile.mkdtemp(dir=settings.SCRATCH_DIR))
-                / f"{pair.root_doc.id}_edited.pdf"
+                / f"{pair.root_doc.id}_edit_{idx}.pdf"
             )
-            pdf.save(filepath)
-            overrides = (
-                DocumentMetadataOverrides().from_document(pair.root_doc)
-                if include_metadata
-                else DocumentMetadataOverrides()
-            )
-            if user is not None:
-                overrides.owner_id = user.id
-                overrides.actor_id = user.id
-            consume_file.apply_async(
-                kwargs={
-                    "input_doc": ConsumableDocument(
+            pdf.remove_unreferenced_resources()
+            pdf.save(version_filepath)
+            consume_tasks.append(
+                consume_file.s(
+                    input_doc=ConsumableDocument(
                         source=DocumentSource.ConsumeFolder,
-                        original_file=filepath,
-                        root_document_id=pair.root_doc.id,
+                        original_file=version_filepath,
                     ),
-                    "overrides": overrides,
-                },
-                headers={"trigger_source": trigger_source},
+                    overrides=overrides,
+                ).set(headers={"trigger_source": trigger_source}),
             )
-        else:
-            consume_tasks = []
-            overrides = (
-                DocumentMetadataOverrides().from_document(pair.root_doc)
-                if include_metadata
-                else DocumentMetadataOverrides()
-            )
-            if user is not None:
-                overrides.owner_id = user.id
-                overrides.actor_id = user.id
-            if not delete_original:
-                overrides.skip_asn_if_exists = True
-            if delete_original and len(pdf_docs) == 1:
-                overrides.asn = pair.root_doc.archive_serial_number
-            for idx, pdf in enumerate(pdf_docs, start=1):
-                version_filepath: Path = (
-                    Path(tempfile.mkdtemp(dir=settings.SCRATCH_DIR))
-                    / f"{pair.root_doc.id}_edit_{idx}.pdf"
-                )
-                pdf.remove_unreferenced_resources()
-                pdf.save(version_filepath)
-                consume_tasks.append(
-                    consume_file.s(
-                        input_doc=ConsumableDocument(
-                            source=DocumentSource.ConsumeFolder,
-                            original_file=version_filepath,
-                        ),
-                        overrides=overrides,
-                    ).set(headers={"trigger_source": trigger_source}),
-                )
 
-            if delete_original:
-                backup = release_archive_serial_numbers([doc.id])
-                try:
-                    chord(
-                        header=consume_tasks,
-                        body=delete.si([doc.id]),
-                    ).on_error(
-                        restore_archive_serial_numbers_task.s(backup),
-                    ).apply_async()
-                except Exception:
-                    restore_archive_serial_numbers(backup)
-                    raise
-            else:
-                group(consume_tasks).delay()
+        if delete_original:
+            backup = release_archive_serial_numbers([doc.id])
+            try:
+                chord(
+                    header=consume_tasks,
+                    body=delete.si([doc.id]),
+                ).on_error(
+                    restore_archive_serial_numbers_task.s(backup),
+                ).apply_async()
+            except Exception:
+                restore_archive_serial_numbers(backup)
+                raise
+        else:
+            group(consume_tasks).delay()
 
     except Exception as e:
         logger.exception(f"Error editing document {pair.root_doc.id}: {e}")

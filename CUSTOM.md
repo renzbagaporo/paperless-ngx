@@ -8,10 +8,16 @@ Notices”: new scans become additional searchable pages under the existing
 document ID and archive serial number. Its title, dates, metadata, permissions,
 custom fields and notes remain attached to that document.
 
-Open a document's **Versions** menu and choose **Append pages to this document**
-or **Replace this document's file**, then select the new PDF or image. Choose
-whether to keep earlier files and whether the new scan should use remote OCR.
-Removing earlier files requires confirmation and delete permission.
+Open **Actions → PDF Editor** to append a new scan, remove pages, rotate or
+reorder them, or split the file into new documents. Choosing a scan selects
+**Update this document**. Page edits and the scan are saved together;
+only the scan's new pages enter OCR. Splitting creates new documents and
+cannot be combined with appending in the same operation.
+
+Updates offer **Keep only the current file** or file history. Removing earlier
+files requires confirmation and delete permission. The editor checks the file
+checksum before saving so another completed edit cannot be silently overwritten.
+**Versions → Replace this document's file** uses the same storage choice.
 
 ## OCR and titles
 
@@ -47,6 +53,23 @@ action and select only **Title**. Scope that workflow to an inbox tag if you
 want to choose which uploads receive an automatic name. Existing collections
 keep their title and date when pages are appended.
 
+Optional local checks validate issue dates printed in OCR text, including
+Japanese eras, kanji numerals and full-width digits. Only a single valid,
+explicitly issue-labeled date can replace the ordinary date selection; a date
+supplied by the uploader takes priority. Ambiguous dates produce a private
+advisory note. A separate check flags formatted OCR numbers supported only by
+another page's plain OCR in the same scan batch. Neither check makes an extra
+AI request. Enable them with:
+
+```dotenv
+PAPERLESS_OCR_VALIDATE_PRINTED_DATES=true
+PAPERLESS_OCR_REVIEW_CROSS_PAGE_NUMBERS=true
+```
+
+These checks are off by default. Appending preserves the collection's title
+and date; review notes identify page numbers after the retained pages. The
+cross-page comparison requires LlamaParse's plain and formatted OCR results.
+
 ## Storage
 
 The explicit **keep only current file** mode discards superseded versions and
@@ -61,7 +84,9 @@ PAPERLESS_STORE_ONLY_CURRENT_FILE=true
 ```
 
 Ordinary upstream version uploads remain available when file history is wanted.
-The storage setting is off by default.
+The storage setting is off by default. It also supplies the API default for
+append, replace and existing-document PDF edits when their retention choice
+is omitted. Those APIs accept an explicit choice for each update.
 
 ## Build
 

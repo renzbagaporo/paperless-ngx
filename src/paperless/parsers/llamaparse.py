@@ -103,6 +103,7 @@ class LlamaParseDocumentParser(RemoteDocumentParser):
             raise ParseError(
                 "LlamaParse OCR requires its engine and API key to be configured",
             )
+        self._review_pages = []
 
         # The consumer suppresses an archive for digital PDFs. Keep their exact
         # existing text and avoid uploading their contents to an external service.
@@ -129,6 +130,7 @@ class LlamaParseDocumentParser(RemoteDocumentParser):
                 raise ParseError("Cannot OCR a PDF with no pages")
             result = self._request_result(source, config)
             pages = self._validated_pages(result, page_count)
+            self._review_pages = pages
             self._text = "\n\n".join(page["text"] for page in pages if page["text"])
             if produce_archive:
                 archive = self._tempdir / "archive.pdf"
@@ -140,6 +142,10 @@ class LlamaParseDocumentParser(RemoteDocumentParser):
             raise ParseError(
                 "LlamaParse returned an unusable document result",
             ) from error
+
+    def get_review_pages(self) -> list[dict]:
+        """Return page-local evidence for optional native ingestion checks."""
+        return getattr(self, "_review_pages", [])
 
     def _request_result(self, source: Path, config: RemoteOCRConfig) -> dict:
         """Upload, poll and delete the source file, including on failed jobs."""
@@ -255,7 +261,16 @@ class LlamaParseDocumentParser(RemoteDocumentParser):
             text = text_pages.get(number) or markdown_pages.get(number) or ""
             if not isinstance(text, str):
                 raise ParseError("LlamaParse returned invalid page text")
-            indexed[number] = {**page, "text": text.strip()}
+            plain = text_pages.get(number, "")
+            markdown = markdown_pages.get(number, "")
+            if not isinstance(plain, str) or not isinstance(markdown, str):
+                raise ParseError("LlamaParse returned invalid page text")
+            indexed[number] = {
+                **page,
+                "text": text.strip(),
+                "plain_text": plain,
+                "markdown": markdown,
+            }
         if set(indexed) != set(range(1, page_count + 1)):
             raise ParseError("LlamaParse did not return every source page")
         return [indexed[number] for number in range(1, page_count + 1)]

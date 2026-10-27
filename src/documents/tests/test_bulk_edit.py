@@ -1503,7 +1503,7 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         self.doc2.refresh_from_db()
         self.assertEqual(self.doc2.archive_serial_number, 333)
 
-    @mock.patch("documents.tasks.consume_file.apply_async")
+    @mock.patch("documents.tasks.update_document_file.apply_async")
     def test_edit_pdf_with_update_document(self, mock_consume_delay) -> None:
         """
         GIVEN:
@@ -1511,7 +1511,7 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         WHEN:
             - edit_pdf is called with update_document=True and a single output
         THEN:
-            - A version update is enqueued targeting the existing document
+            - A PDF update is enqueued targeting the existing document
         """
         doc_ids = [self.doc2.id]
         operations = [{"page": 1}, {"page": 2}]
@@ -1523,17 +1523,16 @@ class TestPDFActions(DirectoriesMixin, TestCase):
             delete_original=False,
         )
 
-        self.assertEqual(result, "OK")
+        self.assertEqual(result["result"], "OK")
         mock_consume_delay.assert_called_once()
         task_kwargs = mock_consume_delay.call_args.kwargs["kwargs"]
         self.assertEqual(task_kwargs["input_doc"].root_document_id, self.doc2.id)
-        self.assertTrue(
-            str(task_kwargs["input_doc"].original_file).endswith("_edited.pdf"),
-        )
-        self.assertIsNotNone(task_kwargs["overrides"])
+        self.assertTrue(task_kwargs["edit_only"])
+        self.assertEqual(task_kwargs["operations"], operations)
+        self.assertFalse(task_kwargs["keep_only_current_file"])
 
     @mock.patch("documents.data_models.magic.from_file", return_value="application/pdf")
-    @mock.patch("documents.tasks.consume_file.apply_async")
+    @mock.patch("documents.tasks.update_document_file.apply_async")
     @mock.patch("pikepdf.new")
     @mock.patch("pikepdf.open")
     def test_edit_pdf_explicit_selection_uses_root_source_when_root_selected(
@@ -1562,9 +1561,12 @@ class TestPDFActions(DirectoriesMixin, TestCase):
             source_mode="explicit_selection",
         )
 
-        self.assertEqual(result, "OK")
-        mock_open.assert_called_once_with(self.doc2.source_path)
+        self.assertEqual(result["result"], "OK")
+        mock_open.assert_not_called()
         mock_consume_delay.assert_called_once()
+        kwargs = mock_consume_delay.call_args.kwargs["kwargs"]
+        self.assertEqual(kwargs["source_document_id"], self.doc2.pk)
+        self.assertEqual(kwargs["source_mode"], "explicit_selection")
 
     @mock.patch("documents.bulk_edit.group")
     @mock.patch("documents.tasks.consume_file.s")

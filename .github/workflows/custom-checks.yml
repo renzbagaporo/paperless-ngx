@@ -43,7 +43,13 @@ jobs:
         run: |
           pytest -o addopts='' --basetemp=/tmp/paperless-custom-pytest \
             src/documents/tests/test_file_updates.py \
+            src/documents/tests/test_pdf_editor_updates.py \
+            src/documents/tests/test_ingestion_checks.py \
+            src/documents/tests/test_consumer.py \
+            src/documents/tests/test_bulk_edit.py \
+            src/documents/tests/test_api_bulk_edit.py \
             src/documents/tests/test_api_document_versions.py \
+            src/documents/tests/test_document_list_effective_content_annotation.py \
             src/documents/tests/test_api_remote_version.py \
             src/documents/tests/test_merge_documents_as_versions.py \
             src/documents/tests/test_version_conditionals.py \
@@ -76,6 +82,7 @@ jobs:
       - name: Test document file controls
         run: |
           pnpm exec jest --runInBand --runTestsByPath \
+            src/app/components/common/pdf-editor/pdf-editor.component.spec.ts \
             src/app/components/document-detail/document-version-dropdown/document-version-dropdown.component.spec.ts \
             src/app/components/document-detail/document-detail.component.spec.ts \
             src/app/services/rest/document.service.spec.ts \

@@ -69,7 +69,7 @@ export class DocumentVersionDropdownComponent
   @Output() fileUpdated = new EventEmitter<void>()
 
   newVersionLabel: string = ''
-  fileUpdateMode: 'version' | 'append' | 'replace_file' = 'version'
+  fileUpdateMode: 'version' | 'replace_file' = 'version'
   keepOnlyCurrentFile = true
   fileReplacementConfirmed = false
   remoteOcr = false

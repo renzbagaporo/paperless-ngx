@@ -2160,6 +2160,41 @@ Set `PAPERLESS_REMOTE_OCR_MODE=workflow_only` to send only explicitly selected
 documents to LlamaParse. Workflow-triggered OCR and the reprocess action use
 the same parser. Uploading or appending a document can incur LlamaParse charges.
 
+### Local ingestion review checks
+
+#### [`PAPERLESS_OCR_VALIDATE_PRINTED_DATES=<bool>`](#PAPERLESS_OCR_VALIDATE_PRINTED_DATES) {#PAPERLESS_OCR_VALIDATE_PRINTED_DATES}
+
+: Defaults to false. On dashboard and consume-folder imports, use a printed
+issue date only when OCR text contains a single valid date explicitly labeled
+as issued, invoiced, created or notified. API and workflow date overrides take
+precedence. Japanese era dates, kanji numerals and fullwidth characters are
+supported; era boundaries, calendar validity and a range from 1900 through
+tomorrow are checked. Ambiguous year-last slash dates are not interpreted.
+Birth dates, due dates and expiry dates are excluded by their labels.
+
+    Multiple conflicting, invalid or unlabelled dates retain the normal date
+    selection and add a private document note inviting review. This local
+    heuristic is conservative: it cannot establish every printed date or
+    detect every labeling error. It makes no additional AI request and works
+    when the configured AI service is unavailable. Existing native AI title
+    suggestions remain available.
+
+#### [`PAPERLESS_OCR_REVIEW_CROSS_PAGE_NUMBERS=<bool>`](#PAPERLESS_OCR_REVIEW_CROSS_PAGE_NUMBERS) {#PAPERLESS_OCR_REVIEW_CROSS_PAGE_NUMBERS}
+
+: Defaults to false. When LlamaParse supplies both plain and formatted text
+for each page, add a private review note if a formatted-only number is absent
+from that page's plain OCR but present on another page. Digit width and common
+thousands separators are normalized. This is an advisory check for possible
+cross-page OCR contamination, not a claim that the number is incorrect.
+No review is inferred when either text view is unavailable. Scan contents and
+indexed text are retained.
+
+    Both checks also run for newly uploaded scans appended to or replacing
+    a document. The collection title and date are preserved; review page
+    numbers account for retained pages. Reordering, rotating or deleting
+    existing PDF pages does not run OCR or repeat ingestion checks. Notes
+    inherit document access; these checks do not create shared tags.
+
 ## AI {#ai}
 
 #### [`PAPERLESS_AI_ENABLED=<bool>`](#PAPERLESS_AI_ENABLED) {#PAPERLESS_AI_ENABLED}

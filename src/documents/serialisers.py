@@ -1030,6 +1030,7 @@ class _DocumentVersionInfo(TypedDict):
     added: datetime
     version_label: str | None
     checksum: str | None
+    archive_checksum: str | None
     is_root: bool
 
 
@@ -1038,6 +1039,7 @@ class DocumentVersionInfoSerializer(serializers.Serializer[_DocumentVersionInfo]
     added = serializers.DateTimeField()
     version_label = serializers.CharField(required=False, allow_null=True)
     checksum = serializers.CharField(required=False, allow_null=True)
+    archive_checksum = serializers.CharField(required=False, allow_null=True)
     is_root = serializers.BooleanField()
 
 
@@ -1129,6 +1131,7 @@ class DocumentSerializer(
                 "id",
                 "added",
                 "checksum",
+                "archive_checksum",
                 "version_label",
                 "root_document_id",
                 "version_index",
@@ -1143,6 +1146,7 @@ class DocumentSerializer(
                 "added": doc.added,
                 "version_label": doc.version_label,
                 "checksum": doc.checksum,
+                "archive_checksum": doc.archive_checksum,
                 "is_root": doc.id == root_doc.id,
             }
 
@@ -1786,6 +1790,18 @@ class PdfEditOperationSerializer(serializers.Serializer[dict[str, int]]):
         return _validate_rotation_degrees(value, field="rotate")
 
 
+class KeepCurrentFileField(serializers.BooleanField):
+    def __init__(self):
+        super().__init__(default=lambda: settings.STORE_ONLY_CURRENT_FILE)
+
+    def get_value(self, dictionary):
+        # An omitted multipart checkbox must use the configured callable default,
+        # rather than DRF treating that callable itself as a submitted boolean.
+        if self.field_name not in dictionary:
+            return serializers.empty
+        return super().get_value(dictionary)
+
+
 class EditPdfDocumentsSerializer(DocumentListSerializer, SourceModeValidationMixin):
     operations = serializers.ListField(
         child=PdfEditOperationSerializer(),
@@ -1794,6 +1810,8 @@ class EditPdfDocumentsSerializer(DocumentListSerializer, SourceModeValidationMix
     )
     delete_original = serializers.BooleanField(required=False, default=False)
     update_document = serializers.BooleanField(required=False, default=False)
+    keep_only_current_file = KeepCurrentFileField()
+    source_checksum = serializers.CharField(required=False)
     include_metadata = serializers.BooleanField(required=False, default=True)
     source_mode = serializers.CharField(
         required=False,
@@ -1821,6 +1839,13 @@ class EditPdfDocumentsSerializer(DocumentListSerializer, SourceModeValidationMix
                 )
 
         doc = Document.objects.get(id=documents[0])
+        doc = bulk_edit._resolve_root_and_source_doc(
+            doc,
+            source_mode=attrs.get(
+                "source_mode",
+                bulk_edit.SourceModeChoices.LATEST_VERSION,
+            ),
+        ).source_doc
         if doc.page_count:
             for op in operations:
                 if op["page"] > doc.page_count:
@@ -2183,6 +2208,19 @@ class BulkEditSerializer(
         else:
             parameters["include_metadata"] = True
 
+        if "keep_only_current_file" in parameters and not isinstance(
+            parameters["keep_only_current_file"],
+            bool,
+        ):
+            raise serializers.ValidationError(
+                "keep_only_current_file must be a boolean",
+            )
+        if "source_checksum" in parameters and not isinstance(
+            parameters["source_checksum"],
+            str,
+        ):
+            raise serializers.ValidationError("source_checksum must be a string")
+
         if any(op.get("doc", 0) >= len(operations) for op in operations):
             raise serializers.ValidationError("doc index is out of bounds")
 
@@ -2195,6 +2233,13 @@ class BulkEditSerializer(
 
         doc = Document.objects.get(id=document_id)
         # doc existence is already validated
+        doc = bulk_edit._resolve_root_and_source_doc(
+            doc,
+            source_mode=parameters.get(
+                "source_mode",
+                bulk_edit.SourceModeChoices.LATEST_VERSION,
+            ),
+        ).source_doc
         if doc.page_count:
             for op in operations:
                 if op["page"] > doc.page_count:
@@ -2473,8 +2518,29 @@ class DocumentVersionSerializer(serializers.Serializer[dict[str, Any]]):
 
 
 class DocumentFileUpdateSerializer(DocumentVersionSerializer):
-    keep_only_current_file = serializers.BooleanField(default=True)
-    remote_ocr = serializers.BooleanField(default=False)
+    keep_only_current_file = KeepCurrentFileField()
+    remote_ocr = serializers.BooleanField(required=False, allow_null=True, default=None)
+    operations = serializers.JSONField(required=False)
+    source_document_id = serializers.IntegerField(required=False, min_value=1)
+    source_mode = serializers.ChoiceField(
+        choices=[
+            bulk_edit.SourceModeChoices.LATEST_VERSION,
+            bulk_edit.SourceModeChoices.EXPLICIT_SELECTION,
+        ],
+        default=bulk_edit.SourceModeChoices.LATEST_VERSION,
+    )
+    source_checksum = serializers.CharField(required=False)
+
+    def validate_operations(self, value):
+        operations = serializers.ListField(
+            child=PdfEditOperationSerializer(),
+            allow_empty=True,
+        ).run_validation(value)
+        if any(operation.get("doc", 0) != 0 for operation in operations):
+            raise serializers.ValidationError(
+                "Append only supports a single output document.",
+            )
+        return operations
 
 
 class DocumentVersionLabelSerializer(serializers.Serializer[dict[str, str | None]]):

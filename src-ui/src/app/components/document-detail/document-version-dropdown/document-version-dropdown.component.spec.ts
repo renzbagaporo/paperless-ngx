@@ -420,10 +420,10 @@ describe('DocumentVersionDropdownComponent', () => {
     expect(modal.close).toHaveBeenCalled()
     expect(toastService.showInfo).toHaveBeenCalled()
   })
-  it('appends to the current document and emits a file refresh after processing', () => {
+  it('replaces the current file and emits a file refresh after processing', () => {
     component.documentId = 42
     component.userCanEdit = true
-    component.fileUpdateMode = 'append'
+    component.fileUpdateMode = 'replace_file'
     component.keepOnlyCurrentFile = true
     component.fileReplacementConfirmed = true
     const file = new File(['pdf'], 'new.pdf', { type: 'application/pdf' })
@@ -438,7 +438,7 @@ describe('DocumentVersionDropdownComponent', () => {
     expect(documentService.updateFile).toHaveBeenCalledWith(
       42,
       file,
-      'append',
+      'replace_file',
       true,
       false
     )
@@ -460,7 +460,7 @@ describe('DocumentVersionDropdownComponent', () => {
 
   it('keeps history for an editor without delete permission', () => {
     permissionsService.currentUserCan.mockReturnValue(false)
-    component.fileUpdateMode = 'append'
+    component.fileUpdateMode = 'replace_file'
     component.onFileUpdateModeChanged()
     expect(component.keepOnlyCurrentFile).toBe(false)
     expect(component.fileReplacementConfirmed).toBe(false)

@@ -290,8 +290,15 @@ def update_document_file(
     *,
     append: bool,
     keep_only_current_file: bool,
-    remote_ocr: bool = False,
+    remote_ocr: bool | None = None,
     user_id: int | None = None,
+    operations: list[dict] | None = None,
+    source_document_id: int | None = None,
+    source_mode: str = "latest_version",
+    source_checksum: str | None = None,
+    edit_only: bool = False,
+    expected_current_document_id: int | None = None,
+    expected_current_checksum: str | None = None,
 ) -> ConsumeFileSuccessResult:
     from documents.file_updates import update_file
 
@@ -307,11 +314,17 @@ def update_document_file(
             try:
                 result = update_file(
                     input_doc.root_document_id,
-                    input_doc.original_file,
+                    None if edit_only else input_doc.original_file,
                     append=append,
                     keep_only_current_file=keep_only_current_file,
                     remote_ocr=remote_ocr,
                     user_id=user_id,
+                    operations=operations,
+                    source_document_id=source_document_id,
+                    source_mode=source_mode,
+                    source_checksum=source_checksum,
+                    expected_current_document_id=expected_current_document_id,
+                    expected_current_checksum=expected_current_checksum,
                 )
             except Exception as error:
                 progress.send_progress(
@@ -332,12 +345,13 @@ def update_document_file(
             )
             return result
     finally:
-        input_doc.original_file.unlink(missing_ok=True)
-        # This directory is created for this API request alone.
-        try:
-            input_doc.original_file.parent.rmdir()
-        except OSError:
-            pass
+        if not edit_only:
+            input_doc.original_file.unlink(missing_ok=True)
+            # This directory is created for this API request alone.
+            try:
+                input_doc.original_file.parent.rmdir()
+            except OSError:
+                pass
 
 
 @shared_task(autoretry_for=(OSError, DatabaseError), retry_backoff=30, max_retries=5)

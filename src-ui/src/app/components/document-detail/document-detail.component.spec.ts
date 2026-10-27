@@ -65,6 +65,7 @@ import { environment } from 'src/environments/environment'
 import { ConfirmDialogComponent } from '../common/confirm-dialog/confirm-dialog.component'
 import { PasswordRemovalConfirmDialogComponent } from '../common/confirm-dialog/password-removal-confirm-dialog/password-removal-confirm-dialog.component'
 import { CustomFieldsDropdownComponent } from '../common/custom-fields-dropdown/custom-fields-dropdown.component'
+import { PdfEditorEditMode } from '../common/pdf-editor/pdf-editor-edit-mode'
 import {
   PdfZoomLevel,
   PdfZoomScale,
@@ -1982,6 +1983,140 @@ describe('DocumentDetailComponent', () => {
     )
     req.flush(true)
     expect(closeSpy).toHaveBeenCalled()
+  })
+
+  it('submits selected-version page edits and an appended scan atomically, then refreshes the same root', () => {
+    let modal: NgbModalRef
+    modalService.activeInstances.subscribe(
+      (instances) => (modal = instances[0])
+    )
+    initNormally()
+    component.selectedVersionId.set(10)
+    component.document().versions = [
+      {
+        id: 10,
+        is_root: false,
+        archive_checksum: 'archive-10',
+        checksum: 'original-10',
+      },
+      { id: doc.id, is_root: true },
+    ]
+    component.editPdf()
+    const editor = modal.componentInstance
+    editor.pages = [
+      { page: 3, rotate: 90, splitAfter: false },
+      { page: 1, rotate: 0, splitAfter: false },
+    ]
+    editor.appendFile = new File(['scan'], 'new-notice.pdf', {
+      type: 'application/pdf',
+    })
+    editor.editMode = PdfEditorEditMode.Update
+    editor.keepOnlyCurrentFile = true
+    editor.fileRemovalConfirmed = true
+    editor.remoteOcr = true
+    const completed = new Subject<any>()
+    jest
+      .spyOn(
+        TestBed.inject(WebsocketStatusService),
+        'onDocumentConsumptionFinished'
+      )
+      .mockReturnValue(completed)
+    jest
+      .spyOn(documentService, 'getVersions')
+      .mockReturnValue(
+        of({ id: doc.id, versions: [{ id: doc.id, is_root: true }] })
+      )
+    const refresh = jest
+      .spyOn(component, 'onStoredFileUpdated')
+      .mockImplementation(() => {})
+    editor.confirm()
+    const request = httpTestingController.expectOne(
+      `${environment.apiBaseUrl}documents/${doc.id}/append/`
+    )
+    const body = request.request.body as FormData
+    expect(body.get('operations')).toBe(
+      '[{"page":3,"rotate":90,"doc":0},{"page":1,"rotate":0,"doc":0}]'
+    )
+    expect(body.get('source_document_id')).toBe('10')
+    expect(body.get('source_mode')).toBe('explicit_selection')
+    expect(body.get('source_checksum')).toBe('archive-10')
+    expect(body.get('remote_ocr')).toBe('true')
+    expect(body.get('keep_only_current_file')).toBe('true')
+    httpTestingController.expectNone(
+      `${environment.apiBaseUrl}documents/edit_pdf/`
+    )
+    request.flush('append-task')
+    completed.next({ taskId: 'other-task' })
+    expect(refresh).not.toHaveBeenCalled()
+    completed.next({ taskId: 'append-task' })
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(component.document().id).toBe(doc.id)
+    expect(component.document().versions).toEqual([
+      { id: doc.id, is_root: true },
+    ])
+  })
+
+  it('applies the retention choice to native page edits and reports task failure without refreshing', () => {
+    let modal: NgbModalRef
+    modalService.activeInstances.subscribe(
+      (instances) => (modal = instances[0])
+    )
+    initNormally()
+    component.selectedVersionId.set(10)
+    component.editPdf()
+    const editor = modal.componentInstance
+    editor.editMode = PdfEditorEditMode.Update
+    editor.keepOnlyCurrentFile = false
+    editor.pages = [{ page: 2, rotate: 270, splitAfter: false }]
+    const failed = new Subject<any>()
+    jest
+      .spyOn(
+        TestBed.inject(WebsocketStatusService),
+        'onDocumentConsumptionFailed'
+      )
+      .mockReturnValue(failed)
+    const error = jest.spyOn(toastService, 'showError')
+    const refresh = jest.spyOn(component, 'onStoredFileUpdated')
+    editor.confirm()
+    const request = httpTestingController.expectOne(
+      `${environment.apiBaseUrl}documents/edit_pdf/`
+    )
+    expect(request.request.body).toMatchObject({
+      documents: [10],
+      operations: [{ page: 2, rotate: 270, doc: 0 }],
+      update_document: true,
+      keep_only_current_file: false,
+      source_mode: 'explicit_selection',
+    })
+    request.flush({ result: 'OK', task_id: 'edit-task' })
+    failed.next({
+      taskId: 'edit-task',
+      message: 'Source changed; reopen editor',
+    })
+    expect(error).toHaveBeenCalledWith(
+      'PDF edit failed',
+      'Source changed; reopen editor'
+    )
+    expect(refresh).not.toHaveBeenCalled()
+    expect(component.document().id).toBe(doc.id)
+  })
+
+  it('reloads preview bytes and content when an update keeps the selected root ID', () => {
+    initNormally()
+    component.document().versions = [{ id: doc.id, is_root: true }]
+    component.selectedVersionId.set(doc.id)
+    jest.spyOn(openDocumentsService, 'isDirty').mockReturnValue(false)
+    jest
+      .spyOn(documentService, 'get')
+      .mockReturnValue(of({ ...doc, content: 'Appended notice text' }))
+    component.onStoredFileUpdated()
+    expect(component.selectedVersionId()).toBe(doc.id)
+    expect(
+      new URL(component.previewUrl()).searchParams.has('file_update')
+    ).toBe(true)
+    expect(component.documentForm.get('content').value).toBe(
+      'Appended notice text'
+    )
   })
 
   it('should support removing password protection from pdfs', () => {

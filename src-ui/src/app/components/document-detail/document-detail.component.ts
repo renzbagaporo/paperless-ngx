@@ -88,6 +88,7 @@ import { DocumentTypeService } from 'src/app/services/rest/document-type.service
 import {
   BulkEditSourceMode,
   DocumentService,
+  EditPdfDocumentsResult,
 } from 'src/app/services/rest/document.service'
 import { SavedViewService } from 'src/app/services/rest/saved-view.service'
 import { StoragePathService } from 'src/app/services/rest/storage-path.service'
@@ -95,7 +96,10 @@ import { TagService } from 'src/app/services/rest/tag.service'
 import { UserService } from 'src/app/services/rest/user.service'
 import { SettingsService } from 'src/app/services/settings.service'
 import { ToastService } from 'src/app/services/toast.service'
-import { WebsocketStatusService } from 'src/app/services/websocket-status.service'
+import {
+  FileStatusPhase,
+  WebsocketStatusService,
+} from 'src/app/services/websocket-status.service'
 import { getFilenameFromContentDisposition } from 'src/app/utils/http'
 import { ISODateAdapter } from 'src/app/utils/ngb-iso-date-adapter'
 import * as UTIF from 'utif'
@@ -1012,6 +1016,11 @@ export class DocumentDetailComponent
         this.selectedVersionId()
       )
     )
+    if (refreshFile) {
+      const thumbnail = new URL(this.thumbUrl())
+      thumbnail.searchParams.set('file_update', Date.now().toString())
+      this.thumbUrl.set(thumbnail.toString())
+    }
     this.loadMetadataForSelectedVersion()
     this.documentsService
       .get(this.documentId(), this.selectedVersionId(), 'content')
@@ -1921,44 +1930,130 @@ export class DocumentDetailComponent
       scrollable: true,
     })
     const sourceDocumentId = this.selectedVersionId() ?? this.document().id
+    const rootId = this.document().id
+    const title = this.document().title
+    const source = this.document().versions?.find(
+      (version) => version.id === sourceDocumentId
+    )
+    const sourceChecksum =
+      source?.archive_checksum ||
+      this.metadata()?.archived_checksum ||
+      source?.checksum ||
+      this.metadata()?.original_checksum
     modal.componentInstance.title = $localize`PDF Editor`
     modal.componentInstance.btnCaption = $localize`Proceed`
     modal.componentInstance.documentID.set(this.document().id)
     modal.componentInstance.versionID.set(sourceDocumentId)
+    modal.componentInstance.configureRetention(
+      this.permissionsService.currentUserCan(
+        PermissionAction.Delete,
+        PermissionType.Document
+      ) && this.permissionsService.currentUserOwnsObject(this.document())
+    )
     modal.componentInstance.confirmClicked
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe(() => {
-        modal.componentInstance.buttonsEnabled.set(false)
-        this.documentsService
-          .editPdfDocuments([sourceDocumentId], {
-            operations: modal.componentInstance.getOperations(),
-            delete_original: modal.componentInstance.deleteOriginal,
-            update_document:
-              modal.componentInstance.editMode == PdfEditorEditMode.Update,
-            include_metadata: modal.componentInstance.includeMetadata,
-            source_mode: BulkEditSourceMode.EXPLICIT_SELECTION,
-          })
-          .pipe(first(), takeUntil(this.unsubscribeNotifier))
-          .subscribe({
-            next: () => {
-              this.toastService.showInfo(
-                $localize`PDF edit operation for "${this.document().title}" will begin in the background.`
+        const editor = modal.componentInstance as PDFEditorComponent
+        editor.buttonsEnabled.set(false)
+        const update = editor.editMode === PdfEditorEditMode.Update
+        const request = {
+          operations: editor.getOperations(),
+          source_mode: BulkEditSourceMode.EXPLICIT_SELECTION,
+          ...(sourceChecksum ? { source_checksum: sourceChecksum } : {}),
+        }
+        const operation: Observable<string | EditPdfDocumentsResult> =
+          editor.appendFile
+            ? this.documentsService.updateFile(
+                rootId,
+                editor.appendFile,
+                'append',
+                editor.keepOnlyCurrentFile,
+                editor.remoteOcr,
+                {
+                  ...request,
+                  source_document_id: sourceDocumentId,
+                }
               )
-              modal.close()
-              if (modal.componentInstance.deleteOriginal) {
-                this.openDocumentService.closeDocument(this.document())
-              }
-            },
-            error: (error) => {
-              if (modal) {
-                modal.componentInstance.buttonsEnabled.set(true)
-              }
-              this.toastService.showError(
-                $localize`Error executing PDF edit operation`,
-                error
-              )
-            },
-          })
+            : this.documentsService.editPdfDocuments([sourceDocumentId], {
+                ...request,
+                delete_original: !update && editor.deleteOriginal,
+                update_document: update,
+                include_metadata: editor.includeMetadata,
+                ...(update
+                  ? { keep_only_current_file: editor.keepOnlyCurrentFile }
+                  : {}),
+              })
+        operation.pipe(first(), takeUntil(this.unsubscribeNotifier)).subscribe({
+          next: (result) => {
+            this.toastService.showInfo(
+              $localize`PDF edit operation for "${title}" will begin in the background.`
+            )
+            modal.close()
+            const taskId = typeof result === 'string' ? result : result?.task_id
+            if (update && taskId) this.watchPdfUpdate(taskId, rootId)
+            if (!update && editor.deleteOriginal) {
+              this.openDocumentService.closeDocument(this.document())
+            }
+          },
+          error: (error) => {
+            if (modal) {
+              modal.componentInstance.buttonsEnabled.set(true)
+            }
+            this.toastService.showError(
+              $localize`Error executing PDF edit operation`,
+              error
+            )
+          },
+        })
+      })
+  }
+
+  private watchPdfUpdate(taskId: string, rootId: number) {
+    const completed = this.websocketStatusService
+      .getConsumerStatusCompleted()
+      .find((status) => status.taskId === taskId)
+    merge(
+      this.websocketStatusService.onDocumentConsumptionFinished().pipe(
+        filter((status) => status.taskId === taskId),
+        map(() => ({ success: true, message: '' }))
+      ),
+      this.websocketStatusService.onDocumentConsumptionFailed().pipe(
+        filter((status) => status.taskId === taskId),
+        map((status) => ({ success: false, message: status.message }))
+      ),
+      ...(completed
+        ? [
+            of({
+              success: completed.phase === FileStatusPhase.SUCCESS,
+              message: completed.message,
+            }),
+          ]
+        : [])
+    )
+      .pipe(first(), takeUntil(this.unsubscribeNotifier))
+      .subscribe((result) => {
+        if (!result.success) {
+          this.toastService.showError(
+            $localize`PDF edit failed`,
+            result.message
+          )
+        } else if (this.documentId() === rootId) {
+          this.documentsService
+            .getVersions(rootId)
+            .pipe(first(), takeUntil(this.unsubscribeNotifier))
+            .subscribe({
+              next: (document) => {
+                if (this.documentId() !== rootId) return
+                this.onVersionsUpdated(document.versions)
+                this.onStoredFileUpdated()
+              },
+              error: (error) =>
+                this.toastService.showError(
+                  $localize`Error refreshing document`,
+                  error
+                ),
+            })
+        }
       })
   }
 

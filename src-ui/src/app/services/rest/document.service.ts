@@ -58,6 +58,20 @@ export interface EditPdfDocumentsRequest {
   update_document?: boolean
   include_metadata?: boolean
   source_mode?: BulkEditSourceMode
+  keep_only_current_file?: boolean
+  source_checksum?: string
+}
+
+export interface AppendPdfPagesRequest {
+  operations: EditPdfOperation[]
+  source_document_id: number
+  source_mode: BulkEditSourceMode
+  source_checksum?: string
+}
+
+export interface EditPdfDocumentsResult {
+  result: string
+  task_id?: string
 }
 
 export interface RemovePasswordDocumentsRequest {
@@ -273,12 +287,20 @@ export class DocumentService extends AbstractPaperlessService<Document> {
     file: File,
     mode: 'append' | 'replace_file',
     keepOnlyCurrentFile: boolean,
-    remoteOcr: boolean = false
+    remoteOcr: boolean = false,
+    edit?: AppendPdfPagesRequest
   ) {
     const formData = new FormData()
     formData.append('document', file, file.name)
     formData.append('keep_only_current_file', String(keepOnlyCurrentFile))
     formData.append('remote_ocr', String(remoteOcr))
+    if (edit) {
+      formData.append('operations', JSON.stringify(edit.operations))
+      formData.append('source_document_id', String(edit.source_document_id))
+      formData.append('source_mode', edit.source_mode)
+      if (edit.source_checksum)
+        formData.append('source_checksum', edit.source_checksum)
+    }
     return this.http.post<string>(
       this.getResourceUrl(documentId, mode),
       formData
@@ -409,10 +431,13 @@ export class DocumentService extends AbstractPaperlessService<Document> {
   }
 
   editPdfDocuments(ids: number[], request: EditPdfDocumentsRequest) {
-    return this.http.post(this.getResourceUrl(null, 'edit_pdf'), {
-      documents: ids,
-      ...request,
-    })
+    return this.http.post<EditPdfDocumentsResult>(
+      this.getResourceUrl(null, 'edit_pdf'),
+      {
+        documents: ids,
+        ...request,
+      }
+    )
   }
 
   removePasswordDocuments(

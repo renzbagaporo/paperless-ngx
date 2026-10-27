@@ -97,6 +97,14 @@ def result_for(source: Path, text="東京ガス ガス料金のお知らせ") ->
 
 
 class TestLlamaParseSelection:
+    def test_preserves_plain_and_formatted_page_evidence(self, scan_pdf):
+        result = result_for(scan_pdf, "plain 1234")
+        result["markdown"]["pages"][0]["markdown"] = "formatted 777888"
+        pages = LlamaParseDocumentParser._validated_pages(result, 1)
+        assert pages[0]["plain_text"] == "plain 1234"
+        assert pages[0]["markdown"] == "formatted 777888"
+        assert pages[0]["text"] == "plain 1234"
+
     def test_protocol(self, llama_parser):
         assert isinstance(llama_parser, ParserProtocol)
         assert llama_parser.uses_remote_service

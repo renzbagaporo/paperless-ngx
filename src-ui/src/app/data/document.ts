@@ -175,5 +175,6 @@ export interface DocumentVersionInfo {
   added?: Date
   version_label?: string
   checksum?: string
+  archive_checksum?: string
   is_root: boolean
 }

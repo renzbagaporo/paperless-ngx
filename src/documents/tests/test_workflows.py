@@ -5124,6 +5124,7 @@ class TestWebhookSend:
     def test_send_webhook_data_or_json(
         self,
         httpx_mock: HTTPXMock,
+        resolve_to: Callable[[str], None],
     ) -> None:
         """
         GIVEN:
@@ -5133,6 +5134,7 @@ class TestWebhookSend:
         THEN:
             - data is sent as form-encoded and json, respectively
         """
+        resolve_to("52.207.186.75")
         httpx_mock.add_response(
             content=b"ok",
         )

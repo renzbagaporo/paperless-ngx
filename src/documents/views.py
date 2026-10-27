@@ -1214,6 +1214,7 @@ class DocumentViewSet(
                     "id",
                     "added",
                     "checksum",
+                    "archive_checksum",
                     "version_label",
                     "root_document_id",
                     "version_index",
@@ -2254,20 +2255,51 @@ class DocumentViewSet(
     def _queue_file_update(self, request, pk, *, append):
         from documents.file_updates import SUPPORTED_UPLOAD_TYPES
         from documents.file_updates import check_file_update_permissions
+        from documents.file_updates import resolve_file_update_source
+        from documents.file_updates import searchable_checksum
 
         serializer = DocumentFileUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         root = self._get_root_doc_for_version_action(pk)
+        validated = serializer.validated_data
         try:
             check_file_update_permissions(
                 root,
                 request.user,
-                keep_only_current_file=serializer.validated_data[
-                    "keep_only_current_file"
-                ],
+                keep_only_current_file=validated["keep_only_current_file"],
             )
         except PermissionError as error:
             return HttpResponseForbidden(str(error))
+        if not append and "operations" in validated:
+            return Response(
+                {"operations": "Page operations are only supported for append."},
+                status=400,
+            )
+        try:
+            source = resolve_file_update_source(
+                root,
+                validated.get("source_document_id"),
+                validated["source_mode"],
+            )
+        except (Document.DoesNotExist, ValueError) as error:
+            return Response({"source_document_id": str(error)}, status=400)
+        expected_checksum = validated.get("source_checksum")
+        if expected_checksum is not None and expected_checksum != searchable_checksum(
+            source,
+        ):
+            return Response(
+                {
+                    "source_checksum": "The document file changed. Reload the editor before saving.",
+                },
+                status=409,
+            )
+        if "operations" in validated:
+            expected_checksum = expected_checksum or searchable_checksum(source)
+        from documents.versioning import get_latest_version_for_root
+
+        current = (
+            get_latest_version_for_root(root) if expected_checksum is not None else None
+        )
         name, data = serializer.validated_data["document"]
         if magic.from_buffer(data, mime=True) not in SUPPORTED_UPLOAD_TYPES:
             return Response(
@@ -2294,6 +2326,18 @@ class DocumentViewSet(
                     ],
                     "remote_ocr": serializer.validated_data["remote_ocr"],
                     "user_id": request.user.pk,
+                    "operations": validated.get("operations"),
+                    "source_document_id": source.pk
+                    if expected_checksum is not None
+                    else validated.get("source_document_id"),
+                    "source_mode": "explicit_selection"
+                    if expected_checksum is not None
+                    else validated["source_mode"],
+                    "source_checksum": expected_checksum,
+                    "expected_current_document_id": current.pk if current else None,
+                    "expected_current_checksum": searchable_checksum(current)
+                    if current
+                    else None,
                 },
                 headers={"trigger_source": PaperlessTask.TriggerSource.WEB_UI},
             )
@@ -3086,6 +3130,25 @@ class DocumentOperationPermissionMixin(PassUserMixin, DocumentSelectionMixin):
         if user.is_superuser:
             return True
 
+        if method == bulk_edit.edit_pdf and parameters.get("update_document"):
+            from documents.file_updates import check_file_update_permissions
+
+            try:
+                for doc in Document.objects.select_related("root_document").filter(
+                    pk__in=documents,
+                ):
+                    check_file_update_permissions(
+                        get_root_document(doc),
+                        user,
+                        keep_only_current_file=parameters.get(
+                            "keep_only_current_file",
+                            settings.STORE_ONLY_CURRENT_FILE,
+                        ),
+                    )
+            except PermissionError:
+                return False
+            return True
+
         root_docs = {
             get_root_document(doc)
             for doc in Document.objects.select_related(
@@ -3213,7 +3276,7 @@ class DocumentOperationPermissionMixin(PassUserMixin, DocumentSelectionMixin):
 
         try:
             result = method(documents, **parameters)
-            return Response({"result": result})
+            return Response(result if isinstance(result, dict) else {"result": result})
         except Exception as e:
             logger.warning(f"An error occurred performing {operation_label}: {e!s}")
             return HttpResponseBadRequest(
@@ -3363,7 +3426,7 @@ class BulkEditView(DocumentOperationPermissionMixin):
                         },
                     )
 
-            return Response({"result": result})
+            return Response(result if isinstance(result, dict) else {"result": result})
         except Exception as e:
             logger.warning(f"An error occurred performing bulk edit: {e!s}")
             return HttpResponseBadRequest(
@@ -3515,6 +3578,7 @@ class ReprocessDocumentsView(DocumentOperationPermissionMixin):
                 name="EditPdfDocumentsResult",
                 fields={
                     "result": serializers.CharField(),
+                    "task_id": serializers.CharField(required=False),
                 },
             ),
         },

@@ -16,7 +16,7 @@ import { environment } from 'src/environments/environment'
 import { PermissionsService } from '../permissions.service'
 import { SettingsService } from '../settings.service'
 import { CustomFieldsService } from './custom-fields.service'
-import { DocumentService } from './document.service'
+import { BulkEditSourceMode, DocumentService } from './document.service'
 
 let httpTestingController: HttpTestingController
 let service: DocumentService
@@ -387,6 +387,40 @@ describe(`DocumentService`, () => {
       documents: ids,
       operations: [{ page: 1, rotate: 90, doc: 0 }],
     })
+  })
+
+  it('submits edited page order and appended scan as one request for the selected version', () => {
+    const file = new File(['scan'], 'new-notice.pdf', {
+      type: 'application/pdf',
+    })
+    subscription = service
+      .updateFile(3, file, 'append', true, false, {
+        operations: [
+          { page: 3, rotate: 90, doc: 0 },
+          { page: 1, rotate: 0, doc: 0 },
+        ],
+        source_document_id: 10,
+        source_mode: BulkEditSourceMode.EXPLICIT_SELECTION,
+        source_checksum: 'searchable-checksum',
+      })
+      .subscribe()
+    const req = httpTestingController.expectOne(
+      `${environment.apiBaseUrl}${endpoint}/3/append/`
+    )
+    const body = req.request.body as FormData
+    expect(body.get('document')).toMatchObject({
+      name: file.name,
+      size: file.size,
+      type: file.type,
+    })
+    expect(body.get('operations')).toBe(
+      '[{"page":3,"rotate":90,"doc":0},{"page":1,"rotate":0,"doc":0}]'
+    )
+    expect(body.get('source_document_id')).toBe('10')
+    expect(body.get('source_mode')).toBe('explicit_selection')
+    expect(body.get('source_checksum')).toBe('searchable-checksum')
+    expect(body.get('keep_only_current_file')).toBe('true')
+    expect(body.get('remote_ocr')).toBe('false')
   })
 
   it('should call appropriate api endpoint for remove password', () => {
