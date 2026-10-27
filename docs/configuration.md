@@ -2088,7 +2088,8 @@ password. All of these options come from their similarly-named [Django settings]
 
 #### [`PAPERLESS_REMOTE_OCR_ENGINE=<str>`](#PAPERLESS_REMOTE_OCR_ENGINE) {#PAPERLESS_REMOTE_OCR_ENGINE}
 
-: The remote OCR engine to use. Currently only Azure AI is supported as "azureai".
+: The remote OCR engine to use: `azureai` for Azure AI Document Intelligence or
+  `llamaparse` for LlamaParse.
 
     Defaults to None, which disables remote OCR.
 
@@ -2101,6 +2102,7 @@ password. All of these options come from their similarly-named [Django settings]
 #### [`PAPERLESS_REMOTE_OCR_ENDPOINT=<str>`](#PAPERLESS_REMOTE_OCR_ENDPOINT) {#PAPERLESS_REMOTE_OCR_ENDPOINT}
 
 : The endpoint to use for the remote OCR engine. This is required for Azure AI.
+  LlamaParse uses `https://api.cloud.llamaindex.ai` when no endpoint is supplied.
 
     Defaults to None.
 
@@ -2121,6 +2123,42 @@ password. All of these options come from their similarly-named [Django settings]
 : If set to false, Paperless blocks remote OCR endpoint URLs that resolve to non-public addresses (e.g., localhost, etc).
 
     Defaults to True.
+
+### LlamaParse OCR
+
+Select LlamaParse under **Settings → Application Configuration → Remote OCR**,
+or configure the equivalent environment variables:
+
+```ini
+PAPERLESS_REMOTE_OCR_ENGINE=llamaparse
+PAPERLESS_REMOTE_OCR_API_KEY=your-llamacloud-api-key
+PAPERLESS_REMOTE_OCR_MODE=always
+```
+
+The native parser sends PDFs and images to LlamaParse's Agentic tier and adds
+an invisible Unicode text layer to the source PDF. Existing PDF vectors and
+compressed images are kept rather than rasterised. Born-digital PDFs for which
+Paperless requests no archive use their existing text without a cloud request.
+The parser translates the configured `PAPERLESS_OCR_LANGUAGE` hints to
+LlamaParse codes in the same order: `eng+jpn+chi_sim` becomes English,
+Japanese and simplified Chinese. Vertical Japanese/Chinese/Korean variants
+use the same provider language. Hints without a mapping are omitted; if no
+mapped hints remain, the provider uses automatic language detection.
+The output is a searchable PDF; PDF/A conformance is not validated by this
+parser. Existing Paperless title and date suggestions work with the extracted
+text and the configured AI backend.
+
+Requests bypass LlamaParse's result cache. The parser attempts to delete each
+uploaded source file after completion or failure. The provider can retain job
+results according to its own retention policy; source-file deletion does not
+delete that history. An unreachable service, failed job or incomplete page
+result fails consumption instead of silently storing partial text. No cloud
+request is made unless this engine is selected and remote processing is enabled
+for the document.
+
+Set `PAPERLESS_REMOTE_OCR_MODE=workflow_only` to send only explicitly selected
+documents to LlamaParse. Workflow-triggered OCR and the reprocess action use
+the same parser. Uploading or appending a document can incur LlamaParse charges.
 
 ## AI {#ai}
 

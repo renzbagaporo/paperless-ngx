@@ -194,6 +194,7 @@ from documents.serialisers import CorrespondentSerializer
 from documents.serialisers import CustomFieldSerializer
 from documents.serialisers import DeleteDocumentsSerializer
 from documents.serialisers import DocumentBarcodeSerializer
+from documents.serialisers import DocumentFileUpdateSerializer
 from documents.serialisers import DocumentSelectionSerializer
 from documents.serialisers import DocumentSerializer
 from documents.serialisers import DocumentTypeSerializer
@@ -232,6 +233,7 @@ from documents.tasks import empty_trash
 from documents.tasks import llmindex_index
 from documents.tasks import sanity_check
 from documents.tasks import train_classifier
+from documents.tasks import update_document_file
 from documents.tasks import update_document_parent_tags
 from documents.utils import get_boolean
 from documents.versioning import VersionResolutionError
@@ -2248,6 +2250,84 @@ class DocumentViewSet(
             return HttpResponseServerError(
                 "Error updating document, check logs for more detail.",
             )
+
+    def _queue_file_update(self, request, pk, *, append):
+        from documents.file_updates import SUPPORTED_UPLOAD_TYPES
+        from documents.file_updates import check_file_update_permissions
+
+        serializer = DocumentFileUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        root = self._get_root_doc_for_version_action(pk)
+        try:
+            check_file_update_permissions(
+                root,
+                request.user,
+                keep_only_current_file=serializer.validated_data[
+                    "keep_only_current_file"
+                ],
+            )
+        except PermissionError as error:
+            return HttpResponseForbidden(str(error))
+        name, data = serializer.validated_data["document"]
+        if magic.from_buffer(data, mime=True) not in SUPPORTED_UPLOAD_TYPES:
+            return Response(
+                {"document": "Upload a PDF or supported image file."},
+                status=400,
+            )
+        settings.SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+        directory = Path(
+            tempfile.mkdtemp(prefix="document-update-", dir=settings.SCRATCH_DIR),
+        )
+        uploaded = directory / pathvalidate.sanitize_filename(name)
+        try:
+            uploaded.write_bytes(data)
+            task = update_document_file.apply_async(
+                kwargs={
+                    "input_doc": ConsumableDocument(
+                        source=DocumentSource.ApiUpload,
+                        original_file=uploaded,
+                        root_document_id=root.pk,
+                    ),
+                    "append": append,
+                    "keep_only_current_file": serializer.validated_data[
+                        "keep_only_current_file"
+                    ],
+                    "remote_ocr": serializer.validated_data["remote_ocr"],
+                    "user_id": request.user.pk,
+                },
+                headers={"trigger_source": PaperlessTask.TriggerSource.WEB_UI},
+            )
+        except Exception:
+            uploaded.unlink(missing_ok=True)
+            directory.rmdir()
+            raise
+        return Response(task.id)
+
+    @extend_schema(
+        request=DocumentFileUpdateSerializer,
+        responses={200: OpenApiTypes.STR},
+    )
+    @action(
+        methods=["post"],
+        detail=True,
+        parser_classes=[parsers.MultiPartParser],
+        permission_classes=[IsAuthenticated],
+    )
+    def append(self, request, pk=None):
+        return self._queue_file_update(request, pk, append=True)
+
+    @extend_schema(
+        request=DocumentFileUpdateSerializer,
+        responses={200: OpenApiTypes.STR},
+    )
+    @action(
+        methods=["post"],
+        detail=True,
+        parser_classes=[parsers.MultiPartParser],
+        permission_classes=[IsAuthenticated],
+    )
+    def replace_file(self, request, pk=None):
+        return self._queue_file_update(request, pk, append=False)
 
     def _get_root_doc_for_version_action(self, pk) -> Document:
         try:

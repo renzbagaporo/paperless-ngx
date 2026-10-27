@@ -2472,6 +2472,11 @@ class DocumentVersionSerializer(serializers.Serializer[dict[str, Any]]):
     validate_document = PostDocumentSerializer().validate_document
 
 
+class DocumentFileUpdateSerializer(DocumentVersionSerializer):
+    keep_only_current_file = serializers.BooleanField(default=True)
+    remote_ocr = serializers.BooleanField(default=False)
+
+
 class DocumentVersionLabelSerializer(serializers.Serializer[dict[str, str | None]]):
     version_label = serializers.CharField(
         label="Version label",

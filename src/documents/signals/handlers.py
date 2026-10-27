@@ -1057,6 +1057,7 @@ def run_workflows(
 
 TRACKED_TASKS: dict[str, PaperlessTask.TaskType] = {
     "documents.tasks.consume_file": PaperlessTask.TaskType.CONSUME_FILE,
+    "documents.tasks.update_document_file": PaperlessTask.TaskType.CONSUME_FILE,
     "documents.tasks.train_classifier": PaperlessTask.TaskType.TRAIN_CLASSIFIER,
     "documents.tasks.sanity_check": PaperlessTask.TaskType.SANITY_CHECK,
     "documents.tasks.llmindex_index": PaperlessTask.TaskType.LLM_INDEX,
@@ -1157,7 +1158,7 @@ def _extract_owner_id(
     overrides = task_kwargs.get("overrides")
     if overrides and hasattr(overrides, "owner_id"):
         return overrides.owner_id
-    return None  # pragma: no cover
+    return task_kwargs.get("user_id")
 
 
 @before_task_publish.connect

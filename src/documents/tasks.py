@@ -12,6 +12,7 @@ from celery import Task
 from celery import shared_task
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
+from django.db import DatabaseError
 from django.db import models
 from django.db import transaction
 from django.db.models.signals import post_save
@@ -280,6 +281,77 @@ def consume_file(
         return msg
     finally:
         consume_task_id.reset(token)
+
+
+@shared_task(bind=True)
+def update_document_file(
+    self: Task,
+    input_doc: ConsumableDocument,
+    *,
+    append: bool,
+    keep_only_current_file: bool,
+    remote_ocr: bool = False,
+    user_id: int | None = None,
+) -> ConsumeFileSuccessResult:
+    from documents.file_updates import update_file
+
+    try:
+        with ProgressManager(input_doc.original_file.name, self.request.id) as progress:
+            progress.send_progress(
+                ProgressStatusOptions.WORKING,
+                "Processing document file",
+                10,
+                100,
+                owner_id=user_id,
+            )
+            try:
+                result = update_file(
+                    input_doc.root_document_id,
+                    input_doc.original_file,
+                    append=append,
+                    keep_only_current_file=keep_only_current_file,
+                    remote_ocr=remote_ocr,
+                    user_id=user_id,
+                )
+            except Exception as error:
+                progress.send_progress(
+                    ProgressStatusOptions.FAILED,
+                    str(error),
+                    100,
+                    100,
+                    owner_id=user_id,
+                )
+                raise
+            progress.send_progress(
+                ProgressStatusOptions.SUCCESS,
+                "Document file updated",
+                100,
+                100,
+                document_id=result["document_id"],
+                owner_id=user_id,
+            )
+            return result
+    finally:
+        input_doc.original_file.unlink(missing_ok=True)
+        # This directory is created for this API request alone.
+        try:
+            input_doc.original_file.parent.rmdir()
+        except OSError:
+            pass
+
+
+@shared_task(autoretry_for=(OSError, DatabaseError), retry_backoff=30, max_retries=5)
+def compact_document_files(document_id: int) -> None:
+    from documents.file_updates import compact_current_files
+
+    compact_current_files(document_id)
+
+
+@shared_task(autoretry_for=(OSError, DatabaseError), retry_backoff=30, max_retries=5)
+def cleanup_obsolete_document_files(paths: list[str], version_ids: list[int]) -> None:
+    from documents.file_updates import _remove_obsolete
+
+    _remove_obsolete([Path(path) for path in paths], version_ids)
 
 
 @shared_task

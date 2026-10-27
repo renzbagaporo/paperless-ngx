@@ -1,3 +1,7 @@
+> This fork is based on Paperless-ngx v3.3.4. The default `custom` branch adds
+> document append/replace controls, optional single-file storage, and native
+> LlamaParse OCR. See [custom features and configuration](CUSTOM.md).
+
 [![ci](https://github.com/paperless-ngx/paperless-ngx/workflows/ci/badge.svg)](https://github.com/paperless-ngx/paperless-ngx/actions)
 [![Crowdin](https://badges.crowdin.net/paperless-ngx/localized.svg)](https://crowdin.com/project/paperless-ngx)
 [![Documentation Status](https://img.shields.io/github/deployments/paperless-ngx/paperless-ngx/github-pages?label=docs)](https://docs.paperless-ngx.com)

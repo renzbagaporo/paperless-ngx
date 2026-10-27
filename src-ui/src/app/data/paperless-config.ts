@@ -71,6 +71,7 @@ export const LLMBackendConfig = {
 
 export const RemoteOCREngineConfig = {
   AZURE_AI: 'azureai',
+  LLAMAPARSE: 'llamaparse',
 }
 
 export const RemoteOCRModeConfig = {
@@ -220,7 +221,7 @@ export const PaperlessConfigOptions: ConfigOption[] = [
     config_key: 'PAPERLESS_REMOTE_OCR_ENDPOINT',
     category: ConfigCategory.OCR,
     section: ConfigSection.RemoteOCR,
-    note: $localize`Required when using the Azure AI engine.`,
+    note: $localize`Required for Azure AI. LlamaParse defaults to https://api.cloud.llamaindex.ai.`,
   },
   {
     key: 'remote_ocr_mode',

@@ -804,6 +804,12 @@ class ConsumerPlugin(
 
         self.run_post_consume_script(document)
 
+        if settings.STORE_ONLY_CURRENT_FILE and document.root_document_id is None:
+            from documents.file_updates import compact_imported_document
+
+            compact_imported_document(document)
+            document.refresh_from_db()
+
         self.log.info(f"Document {document} consumption finished")
 
         self._send_progress(

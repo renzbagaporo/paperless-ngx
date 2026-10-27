@@ -82,6 +82,9 @@ EMPTY_TRASH_DIR = (
 
 # Lock file for synchronizing changes to the MEDIA directory across multiple
 # threads.
+# Explicit storage policy: retain the current searchable file on the root only.
+STORE_ONLY_CURRENT_FILE = get_bool_from_env("PAPERLESS_STORE_ONLY_CURRENT_FILE")
+
 MEDIA_LOCK = MEDIA_ROOT / "media.lock"
 INDEX_DIR = DATA_DIR / "index"
 

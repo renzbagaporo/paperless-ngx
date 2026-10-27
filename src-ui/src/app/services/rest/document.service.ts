@@ -268,6 +268,23 @@ export class DocumentService extends AbstractPaperlessService<Document> {
     )
   }
 
+  updateFile(
+    documentId: number,
+    file: File,
+    mode: 'append' | 'replace_file',
+    keepOnlyCurrentFile: boolean,
+    remoteOcr: boolean = false
+  ) {
+    const formData = new FormData()
+    formData.append('document', file, file.name)
+    formData.append('keep_only_current_file', String(keepOnlyCurrentFile))
+    formData.append('remote_ocr', String(remoteOcr))
+    return this.http.post<string>(
+      this.getResourceUrl(documentId, mode),
+      formData
+    )
+  }
+
   getVersions(documentId: number): Observable<Document> {
     return this.http.get<Document>(this.getResourceUrl(documentId), {
       params: {

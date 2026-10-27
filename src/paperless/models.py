@@ -80,6 +80,7 @@ class RemoteOCREngine(models.TextChoices):
     """
 
     AZURE_AI = ("azureai", _("Azure AI Document Intelligence"))
+    LLAMAPARSE = ("llamaparse", _("LlamaParse"))
 
 
 class RemoteOCRMode(models.TextChoices):

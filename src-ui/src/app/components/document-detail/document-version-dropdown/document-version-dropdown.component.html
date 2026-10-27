@@ -1,5 +1,10 @@
 <div class="btn-group" ngbDropdown autoClose="outside">
-  <button class="btn btn-sm btn-outline-secondary dropdown-toggle" ngbDropdownToggle aria-label="Versions" i18n-aria-label>
+  <button
+    class="btn btn-sm btn-outline-secondary dropdown-toggle"
+    ngbDropdownToggle
+    aria-label="Versions"
+    i18n-aria-label
+  >
     <i-bs name="file-earmark-diff"></i-bs>
     <span class="d-none d-lg-inline ps-1" i18n>Versions</span>
     @if (versions.length > 1) {
@@ -9,74 +14,173 @@
   <div class="dropdown-menu shadow" ngbDropdownMenu>
     <div class="px-3 py-2 mb-2">
       @if (versionUploadState() === UploadState.Idle) {
-        <div class="input-group input-group-sm mb-2">
-          <label class="input-group-text" for="newVersionLabel" i18n>Label</label>
-          <input
-            id="newVersionLabel"
-            class="form-control"
-            type="text"
-            [(ngModel)]="newVersionLabel"
-            i18n-placeholder
-            placeholder="Optional"
-            [disabled]="!userIsOwner || !userCanEdit"
-          />
-        </div>
+        <label class="form-label small" for="fileUpdateMode" i18n
+          >Upload action</label
+        >
+        <select
+          id="fileUpdateMode"
+          class="form-select form-select-sm mb-2"
+          [(ngModel)]="fileUpdateMode"
+          (ngModelChange)="onFileUpdateModeChanged()"
+          [disabled]="!userCanEdit"
+        >
+          <option value="version" i18n>Add a file version</option>
+          <option value="append" i18n>Append pages to this document</option>
+          <option value="replace_file" i18n>
+            Replace this document's file
+          </option>
+        </select>
+        @if (fileUpdateMode !== 'version') {
+          <p class="small" i18n>
+            The document ID, serial number, title and metadata stay the same.
+            Appending uses its latest searchable file.
+          </p>
+          <div class="form-check small mb-2">
+            <input
+              id="keepOnlyCurrentFile"
+              class="form-check-input"
+              type="checkbox"
+              [(ngModel)]="keepOnlyCurrentFile"
+              [disabled]="!canRemoveEarlierFiles"
+            />
+            <label for="keepOnlyCurrentFile" class="form-check-label" i18n
+              >Keep only the current file</label
+            >
+          </div>
+          @if (keepOnlyCurrentFile) {
+            <div class="form-check small mb-2">
+              <input
+                id="fileReplacementConfirmed"
+                class="form-check-input"
+                type="checkbox"
+                [(ngModel)]="fileReplacementConfirmed"
+              />
+              <label
+                for="fileReplacementConfirmed"
+                class="form-check-label"
+                i18n
+                >I understand that earlier files and versions will be
+                permanently removed after processing succeeds.</label
+              >
+            </div>
+          }
+          <div class="form-check small mb-2">
+            <input
+              id="fileRemoteOcr"
+              class="form-check-input"
+              type="checkbox"
+              [(ngModel)]="remoteOcr"
+            />
+            <label for="fileRemoteOcr" class="form-check-label" i18n
+              >Request remote OCR for this scan</label
+            >
+          </div>
+        }
+        @if (fileUpdateMode === 'version') {
+          <div class="input-group input-group-sm mb-2">
+            <label class="input-group-text" for="newVersionLabel" i18n
+              >Label</label
+            >
+            <input
+              id="newVersionLabel"
+              class="form-control"
+              type="text"
+              [(ngModel)]="newVersionLabel"
+              i18n-placeholder
+              placeholder="Optional"
+              [disabled]="!userIsOwner || !userCanEdit"
+            />
+          </div>
+        }
         <input
           #versionFileInput
           type="file"
           class="visually-hidden"
+          [accept]="
+            fileUpdateMode === 'version' ? undefined : 'application/pdf,image/*'
+          "
           (change)="onVersionFileSelected($event)"
         />
         <div class="btn-group btn-group-sm w-100">
           <button
             class="btn btn-sm btn-outline-secondary w-100"
             (click)="versionFileInput.click()"
-            [disabled]="!userIsOwner || !userCanEdit"
-            title="Upload a new version"
+            [disabled]="
+              !userCanEdit ||
+              (fileUpdateMode !== 'version' &&
+                keepOnlyCurrentFile &&
+                !fileReplacementConfirmed)
+            "
+            title="Upload a file"
             i18n-title
           >
-            <i-bs name="file-earmark-plus"></i-bs><span class="ps-1" i18n>Upload</span>
+            <i-bs name="file-earmark-plus"></i-bs
+            ><span class="ps-1" i18n>Upload</span>
           </button>
-          <button
-            class="btn btn-sm btn-outline-secondary w-100"
-            (click)="addExistingDocumentAsVersion()"
-            [disabled]="!userIsOwner || !userCanEdit"
-            title="Use an existing document"
-            i18n-title
-          >
-            <i-bs name="file-earmark"></i-bs><span class="ps-1" i18n>Existing</span>
-          </button>
+          @if (fileUpdateMode === 'version') {
+            <button
+              class="btn btn-sm btn-outline-secondary w-100"
+              (click)="addExistingDocumentAsVersion()"
+              [disabled]="!userIsOwner || !userCanEdit"
+              title="Use an existing document"
+              i18n-title
+            >
+              <i-bs name="file-earmark"></i-bs
+              ><span class="ps-1" i18n>Existing</span>
+            </button>
+          }
         </div>
       } @else {
         @switch (versionUploadState()) {
           @case (UploadState.Uploading) {
             <div class="small text-muted mt-1 d-flex align-items-center">
-              <output class="spinner-border spinner-border-sm me-2" aria-hidden="true"></output>
+              <output
+                class="spinner-border spinner-border-sm me-2"
+                aria-hidden="true"
+              ></output>
               <span i18n>Uploading version...</span>
             </div>
           }
           @case (UploadState.Processing) {
             <div class="small text-muted mt-1 d-flex align-items-center">
-              <output class="spinner-border spinner-border-sm me-2" aria-hidden="true"></output>
+              <output
+                class="spinner-border spinner-border-sm me-2"
+                aria-hidden="true"
+              ></output>
               <span i18n>Processing version...</span>
             </div>
           }
           @case (UploadState.Failed) {
-            <div class="small text-danger mt-1 d-flex align-items-center justify-content-between">
+            <div
+              class="small text-danger mt-1 d-flex align-items-center justify-content-between"
+            >
               <span i18n>Version upload failed.</span>
-              <button type="button" class="btn btn-link btn-sm p-0 ms-2" (click)="clearVersionUploadStatus()" i18n>Dismiss</button>
+              <button
+                type="button"
+                class="btn btn-link btn-sm p-0 ms-2"
+                (click)="clearVersionUploadStatus()"
+                i18n
+              >
+                Dismiss
+              </button>
             </div>
             @if (versionUploadError()) {
-              <div class="small text-muted mt-1">{{ versionUploadError() }}</div>
+              <div class="small text-muted mt-1">
+                {{ versionUploadError() }}
+              </div>
             }
           }
         }
       }
     </div>
     @for (version of versions; track version.id) {
-      <div class="dropdown-item border-top px-0" [class.pe-3]="versions.length === 1">
+      <div
+        class="dropdown-item border-top px-0"
+        [class.pe-3]="versions.length === 1"
+      >
         <div class="d-flex align-items-center w-100 py-2 version-item">
-          <div class="btn btn-link link-underline link-underline-opacity-0 d-flex align-items-center small text-start p-0 version-link"
+          <div
+            class="btn btn-link link-underline link-underline-opacity-0 d-flex align-items-center small text-start p-0 version-link"
             (click)="selectVersion(version.id)"
           >
             <div class="check mx-3">
@@ -88,7 +192,12 @@
             </div>
             <div class="d-flex flex-column">
               @if (isEditingVersion(version.id)) {
-                <label class="visually-hidden" for="versionLabel{{ version.id }}" i18n>Version label</label>
+                <label
+                  class="visually-hidden"
+                  for="versionLabel{{ version.id }}"
+                  i18n
+                  >Version label</label
+                >
               }
               <div class="input-group input-group-sm mb-1">
                 @if (isEditingVersion(version.id)) {
@@ -109,7 +218,13 @@
                     @if (version.version_label) {
                       {{ version.version_label }}
                     } @else {
-                      <span class="fst-italic"><ng-container i18n>Version</ng-container>&nbsp;{{ versions.length - $index }}&nbsp;<span class="text-muted small">(#{{ version.id }})</span></span>
+                      <span class="fst-italic"
+                        ><ng-container i18n>Version</ng-container>&nbsp;{{
+                          versions.length - $index
+                        }}&nbsp;<span class="text-muted small"
+                          >(#{{ version.id }})</span
+                        ></span
+                      >
                     }
                   </span>
                 }
@@ -118,7 +233,11 @@
                     type="button"
                     class="btn btn-outline-secondary"
                     [disabled]="savingVersionLabelId() !== null"
-                    (click)="isEditingVersion(version.id) ? submitEditedVersionLabel(version, $event) : beginEditingVersion(version, $event)"
+                    (click)="
+                      isEditingVersion(version.id)
+                        ? submitEditedVersionLabel(version, $event)
+                        : beginEditingVersion(version, $event)
+                    "
                   >
                     @if (isEditingVersion(version.id)) {
                       <i-bs width=".8rem" height=".8rem" name="check-lg"></i-bs>
@@ -129,9 +248,9 @@
                 }
               </div>
               <div class="d-flex text-muted small align-items-center mt-1">
-                {{ version.added | customDate:'short' }}
+                {{ version.added | customDate: 'short' }}
                 <div class="badge bg-light text-muted ms-auto">
-                  {{ version.checksum | slice:0:8 }}
+                  {{ version.checksum | slice: 0 : 8 }}
                 </div>
               </div>
             </div>
@@ -144,7 +263,10 @@
               i18n-confirmMessage
               [disabled]="!userIsOwner || !userCanEdit"
               (confirm)="deleteVersion(version.id)"
-              *pngxIfPermissions="{ action: PermissionAction.Delete, type: PermissionType.Document }"
+              *pngxIfPermissions="{
+                action: PermissionAction.Delete,
+                type: PermissionType.Document,
+              }"
             >
               <span class="visually-hidden" i18n>Delete version</span>
             </pngx-confirm-button>

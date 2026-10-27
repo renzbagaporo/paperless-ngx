@@ -231,6 +231,35 @@ Version-aware endpoints:
 - `PATCH /api/documents/{id}/versions/{version_id}/`: updates the `version_label` of a specific version.
 - `DELETE /api/documents/{root_id}/versions/{version_id}/`: deletes a non-root version.
 
+## Appending pages and replacing files
+
+The custom branch adds two multipart endpoints:
+
+- `POST /api/documents/{id}/append/`: OCR the uploaded PDF or image and append
+  its pages after the latest searchable file of this document.
+- `POST /api/documents/{id}/replace_file/`: OCR an uploaded PDF or image and use
+  it as this document's current file.
+
+Both accept `document`, `keep_only_current_file` (default `true`) and
+`remote_ocr` (default `false`). They return a consumption task UUID. The
+completed task references the existing root document ID. Title, dates, ASN,
+owner, permissions, tags, custom fields, notes and share links stay attached to
+that document. The configured native parser handles only the new scan;
+appending does not send existing pages through OCR again. Concurrent appends
+are serialized and each uses the latest committed file.
+
+With `keep_only_current_file=true`, earlier files and file versions are
+permanently removed after processing commits successfully. The searchable PDF
+becomes the root file, without an additional archive copy. Both global and
+object-level change and delete permissions are required. With `false`, change
+permission is enough and the combined or replacement PDF is retained as an
+additional version. Permissions are checked again after OCR finishes.
+
+In the document dashboard, open **Versions**, select **Append pages to this
+document** or **Replace this document's file**, and upload the scan. Keeping
+only the current file requires an explicit acknowledgement of history removal.
+The ordinary **Add a file version** action remains available.
+
 ## Permissions
 
 All objects (documents, tags, etc.) allow setting object-level permissions

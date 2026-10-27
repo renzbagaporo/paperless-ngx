@@ -982,7 +982,11 @@ export class DocumentDetailComponent
   }
 
   // Update file preview and download target to a specific version (by document id)
-  selectVersion(versionId: number, keepContentEdits: boolean = false) {
+  selectVersion(
+    versionId: number,
+    keepContentEdits: boolean = false,
+    refreshFile: boolean = false
+  ) {
     this.versionChangeNotifier.next()
     this.selectedVersionId.set(versionId)
     // remember so the version can be restored when returning to the document
@@ -996,6 +1000,11 @@ export class DocumentDetailComponent
         this.selectedVersionId()
       )
     )
+    if (refreshFile) {
+      const preview = new URL(this.previewUrl())
+      preview.searchParams.set('file_update', Date.now().toString())
+      this.previewUrl.set(preview.toString())
+    }
     this.updatePdfSource()
     this.thumbUrl.set(
       this.documentsService.getThumbUrl(
@@ -1085,6 +1094,14 @@ export class DocumentDetailComponent
       modal.close()
       this.save(false, () => this.selectVersion(versionId))
     })
+  }
+
+  onStoredFileUpdated() {
+    if (this.openDocumentService.isDirty(this.document())) {
+      this.showIncomingUpdateModal(this.document().modified)
+    } else {
+      this.selectVersion(this.document().versions[0].id, false, true)
+    }
   }
 
   onVersionsUpdated(versions: DocumentVersionInfo[]) {

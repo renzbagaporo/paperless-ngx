@@ -8,8 +8,8 @@ import { Subject, of, throwError } from 'rxjs'
 import { DocumentVersionInfo } from 'src/app/data/document'
 import {
   PermissionAction,
-  PermissionsService,
   PermissionType,
+  PermissionsService,
 } from 'src/app/services/permissions.service'
 import { DocumentService } from 'src/app/services/rest/document.service'
 import { SettingsService } from 'src/app/services/settings.service'
@@ -31,6 +31,7 @@ describe('DocumentVersionDropdownComponent', () => {
       | 'mergeDocumentsAsVersions'
       | 'uploadVersion'
       | 'updateVersionLabel'
+      | 'updateFile'
     >
   >
   let toastService: jest.Mocked<Pick<ToastService, 'showError' | 'showInfo'>>
@@ -50,6 +51,7 @@ describe('DocumentVersionDropdownComponent', () => {
       mergeDocumentsAsVersions: jest.fn(),
       uploadVersion: jest.fn(),
       updateVersionLabel: jest.fn(),
+      updateFile: jest.fn(),
     }
     modalService = { open: jest.fn() }
     toastService = {
@@ -417,5 +419,50 @@ describe('DocumentVersionDropdownComponent', () => {
     expect(component.newVersionLabel).toEqual('')
     expect(modal.close).toHaveBeenCalled()
     expect(toastService.showInfo).toHaveBeenCalled()
+  })
+  it('appends to the current document and emits a file refresh after processing', () => {
+    component.documentId = 42
+    component.userCanEdit = true
+    component.fileUpdateMode = 'append'
+    component.keepOnlyCurrentFile = true
+    component.fileReplacementConfirmed = true
+    const file = new File(['pdf'], 'new.pdf', { type: 'application/pdf' })
+    documentService.updateFile.mockReturnValue(of('append-task'))
+    documentService.getVersions.mockReturnValue(
+      of({ id: 42, versions: [{ id: 42, is_root: true }] } as any)
+    )
+    const refreshed = jest.spyOn(component.fileUpdated, 'emit')
+    component.onVersionFileSelected({
+      target: { files: [file], value: 'new.pdf' },
+    } as unknown as Event)
+    expect(documentService.updateFile).toHaveBeenCalledWith(
+      42,
+      file,
+      'append',
+      true,
+      false
+    )
+    expect(documentService.uploadVersion).not.toHaveBeenCalled()
+    finished$.next({ taskId: 'append-task' })
+    expect(refreshed).toHaveBeenCalled()
+  })
+
+  it('requires confirmation before removing earlier files', () => {
+    component.userCanEdit = true
+    component.fileUpdateMode = 'replace_file'
+    component.keepOnlyCurrentFile = true
+    component.fileReplacementConfirmed = false
+    component.onVersionFileSelected({
+      target: { files: [new File(['pdf'], 'new.pdf')], value: 'new.pdf' },
+    } as unknown as Event)
+    expect(documentService.updateFile).not.toHaveBeenCalled()
+  })
+
+  it('keeps history for an editor without delete permission', () => {
+    permissionsService.currentUserCan.mockReturnValue(false)
+    component.fileUpdateMode = 'append'
+    component.onFileUpdateModeChanged()
+    expect(component.keepOnlyCurrentFile).toBe(false)
+    expect(component.fileReplacementConfirmed).toBe(false)
   })
 })

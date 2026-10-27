@@ -27,6 +27,7 @@ import {
 import { DocumentVersionInfo } from 'src/app/data/document'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
+import { PermissionsService } from 'src/app/services/permissions.service'
 import { DocumentService } from 'src/app/services/rest/document.service'
 import { ToastService } from 'src/app/services/toast.service'
 import {
@@ -65,8 +66,13 @@ export class DocumentVersionDropdownComponent
 
   @Output() versionSelected = new EventEmitter<number>()
   @Output() versionsUpdated = new EventEmitter<DocumentVersionInfo[]>()
+  @Output() fileUpdated = new EventEmitter<void>()
 
   newVersionLabel: string = ''
+  fileUpdateMode: 'version' | 'append' | 'replace_file' = 'version'
+  keepOnlyCurrentFile = true
+  fileReplacementConfirmed = false
+  remoteOcr = false
   readonly versionUploadState = signal(UploadState.Idle)
   readonly versionUploadError = signal<string | null>(null)
   readonly savingVersionLabelId = signal<number | null>(null)
@@ -74,6 +80,7 @@ export class DocumentVersionDropdownComponent
   versionLabelDraft: string = ''
 
   private readonly documentsService = inject(DocumentService)
+  private readonly permissionsService = inject(PermissionsService)
   private readonly toastService = inject(ToastService)
   private readonly websocketStatusService = inject(WebsocketStatusService)
   private readonly modalService = inject(NgbModal)
@@ -84,6 +91,7 @@ export class DocumentVersionDropdownComponent
     if (changes.documentId && !changes.documentId.firstChange) {
       this.documentChange$.next()
       this.clearVersionUploadStatus()
+      this.fileReplacementConfirmed = false
       this.cancelEditingVersion()
     }
   }
@@ -201,22 +209,50 @@ export class DocumentVersionDropdownComponent
       })
   }
 
+  get canRemoveEarlierFiles(): boolean {
+    return this.permissionsService.currentUserCan(
+      this.PermissionAction.Delete,
+      this.PermissionType.Document
+    )
+  }
+
+  onFileUpdateModeChanged(): void {
+    this.fileReplacementConfirmed = false
+    if (!this.canRemoveEarlierFiles) this.keepOnlyCurrentFile = false
+  }
+
   onVersionFileSelected(event: Event): void {
     const input = event.target as HTMLInputElement
     if (!input?.files || input.files.length === 0) return
+    if (
+      this.fileUpdateMode !== 'version' &&
+      (!this.userCanEdit ||
+        (this.keepOnlyCurrentFile &&
+          (!this.fileReplacementConfirmed || !this.canRemoveEarlierFiles)))
+    )
+      return
     const uploadDocumentId = this.documentId
     const file = input.files[0]
     input.value = ''
     const label = this.newVersionLabel?.trim()
     this.versionUploadState.set(UploadState.Uploading)
     this.versionUploadError.set(null)
-    this.documentsService
-      .uploadVersion(uploadDocumentId, file, label)
+    const upload =
+      this.fileUpdateMode === 'version'
+        ? this.documentsService.uploadVersion(uploadDocumentId, file, label)
+        : this.documentsService.updateFile(
+            uploadDocumentId,
+            file,
+            this.fileUpdateMode,
+            this.keepOnlyCurrentFile,
+            this.remoteOcr
+          )
+    upload
       .pipe(
         first(),
         tap(() => {
           this.toastService.showInfo(
-            $localize`Uploading new version. Processing will happen in the background.`
+            $localize`Uploading file. Processing will happen in the background.`
           )
           this.newVersionLabel = ''
           this.versionUploadState.set(UploadState.Processing)
@@ -269,6 +305,7 @@ export class DocumentVersionDropdownComponent
             // The API returns versions newest first
             this.versionSelected.emit(doc.versions[0].id)
             this.clearVersionUploadStatus()
+            if (this.fileUpdateMode !== 'version') this.fileUpdated.emit()
           }
         },
         error: (error) => {

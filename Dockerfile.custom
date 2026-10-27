@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1
+FROM docker.io/node:24-bookworm@sha256:934240a162082fd8b8a2f90cd5114446443f1eba1c5378f6687167ca405e6584 AS compile-frontend
+WORKDIR /src/src-ui
+RUN npm install --global pnpm@11.15.1
+COPY src-ui/package.json src-ui/pnpm-lock.yaml src-ui/pnpm-workspace.yaml src-ui/.npmrc ./
+RUN pnpm install --frozen-lockfile
+COPY src-ui ./
+RUN pnpm exec ng build --configuration production
+
+# Keep upstream's tested runtime/dependencies and layer this fork's application on it.
+FROM ghcr.io/paperless-ngx/paperless-ngx:3.3.4@sha256:9bc6e8248891bcfa6f52fffe8b81e4ea8cae75790c3ec1b9906961a7ba55c969
+LABEL org.opencontainers.image.source="https://github.com/renzbagaporo/paperless-ngx"
+WORKDIR /usr/src/paperless/src
+COPY --chown=1000:1000 src/ ./
+COPY --chown=1000:1000 pyproject.toml uv.lock ./
+COPY --from=compile-frontend --chown=1000:1000 /src/src/documents/static/frontend/ ./documents/static/frontend/
+RUN PAPERLESS_SECRET_KEY=build-time-dummy python3 manage.py collectstatic --clear --no-input --link
