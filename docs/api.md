@@ -311,7 +311,7 @@ new document without invoking a parser. Send, for example:
 
 ```json
 {
-  "operations": [{"page": 3, "rotate": 90}, {"page": 1}],
+  "operations": [{ "page": 3, "rotate": 90 }, { "page": 1 }],
   "source_document_id": 42,
   "source_checksum": "<file_checksum from page_data>",
   "move": false,
