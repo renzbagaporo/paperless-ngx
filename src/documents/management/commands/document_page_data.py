@@ -55,7 +55,9 @@ class Command(BaseCommand):
         failures = 0
         completed = 0
         for document_id in identifiers:
-            document = Document.objects.get(pk=document_id)
+            document = (
+                Document.global_objects if operation == "backfill" else Document.objects
+            ).get(pk=document_id)
             if operation == "enrich":
                 count = missing_rich_pages(document)
                 self.stdout.write(

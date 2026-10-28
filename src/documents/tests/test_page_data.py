@@ -288,6 +288,21 @@ class PageDataTests(PageFixture, TestCase):
             identifiers,
         )
 
+    def test_backfill_command_includes_trashed_documents_and_restores_their_pages(self):
+        self.document.delete()
+        output = StringIO()
+        call_command("document_page_data", "backfill", stdout=output)
+        self.assertEqual(DocumentPage.global_objects.count(), 0)
+        call_command("document_page_data", "backfill", "--apply", stdout=output)
+        self.assertEqual(DocumentPage.objects.count(), 0)
+        self.assertEqual(DocumentPage.global_objects.count(), 3)
+        Document.deleted_objects.get(pk=self.document.pk).restore(strict=False)
+        self.document.refresh_from_db()
+        self.assertEqual(
+            [page["text"] for page in stored_pages(self.document)],
+            ["First notice", "Second notice", "Third notice"],
+        )
+
     def test_enrichment_retains_files_identity_and_existing_content(self):
         count = enrich_document(self.document.pk, max_pages=2)
         self.assertEqual(count, 2)
