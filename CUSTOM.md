@@ -101,12 +101,44 @@ docker build \
   --tag paperless-ngx-custom:3.3.4 .
 ```
 
-The **Build custom image** workflow can build the same image on GitHub. Its
-`publish` option defaults to false. When enabled, the workflow publishes
-`ghcr.io/renzbagaporo/paperless-ngx:personal` and a commit-specific
-`personal-<full-commit-sha>` tag. Deployments pin the commit-specific tag.
-The optional `revision` input selects the source commit independently of the
-workflow revision, so a reviewed commit can be built after workflow updates.
+## Personal releases
+
+Pushes to `personal` run the full upstream backend and frontend tests, custom
+feature tests, release-policy tests, lint and static analysis. Images are
+published by **Publish personal release image** when a final GitHub release
+is published with a tag such as `personal-v3.3.4-1`.
+
+After integrating an upstream stable release:
+
+1. Merge the upstream release into `personal`, resolve conflicts, and update
+   the pinned runtime in `Dockerfile.custom` and the custom test image to
+   that upstream release. Advance `stable` to the integrated upstream commit.
+2. Wait for the checks on the exact `personal` commit to finish successfully.
+3. Create and publish a final GitHub release targeting that tested commit.
+   Use `personal-v<upstream-version>-<revision>`; the revision starts at `1`.
+   A personal fix can get another revision without a new upstream release.
+4. Wait for the image publication workflow, then update the deployment pin
+   to its commit-specific image reference from the workflow summary.
+
+The publication gate requires the tagged commit to belong to `personal` and
+contain `stable`, with matching tag, application and stable versions and a
+matching digest-pinned upstream runtime. The latest push run on `personal`
+for each of the six required workflows must have succeeded for that exact
+commit. PR checks, manual checks, skipped workflows, and older successful
+attempts cannot substitute for failing or incomplete checks. Publishing a
+release early fails the gate; rerun it after the checks pass.
+
+Each release publishes two tags in `ghcr.io/renzbagaporo/paperless-ngx`:
+
+- The release tag, such as `personal-v3.3.4-1`.
+- `personal-<full-commit-sha>`, which deployments pin.
+
+Only release publication starts an image build; ordinary pushes and tag
+creation run checks. Drafts, prereleases and upstream release names do not
+publish personal images. The build checks out the verified commit even if
+`personal` advances while it is running. Set the container package's visibility
+to **Public** after its first publication so guests can pull without a registry
+credential. The first release must include this workflow.
 
 Use this image with the existing Paperless deployment configuration. This fork
 does not automatically deploy or reset any instance.
