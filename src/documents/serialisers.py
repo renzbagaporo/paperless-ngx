@@ -1802,6 +1802,37 @@ class KeepCurrentFileField(serializers.BooleanField):
         return super().get_value(dictionary)
 
 
+class SplitPagesSerializer(serializers.Serializer):
+    operations = serializers.ListField(
+        child=PdfEditOperationSerializer(),
+        allow_empty=False,
+    )
+    move = serializers.BooleanField(default=False)
+    title = serializers.CharField(required=False, max_length=128)
+    archive_serial_number = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=0,
+        max_value=Document.ARCHIVE_SERIAL_NUMBER_MAX,
+    )
+    keep_only_current_file = KeepCurrentFileField()
+    source_document_id = serializers.IntegerField(required=False, min_value=1)
+    source_checksum = serializers.CharField(required=True)
+
+    def validate(self, attrs):
+        if any(operation.get("doc", 0) != 0 for operation in attrs["operations"]):
+            raise serializers.ValidationError("Choose a single output document.")
+        asn = attrs.get("archive_serial_number")
+        if (
+            asn is not None
+            and Document.global_objects.filter(archive_serial_number=asn).exists()
+        ):
+            raise serializers.ValidationError(
+                {"archive_serial_number": "This ASN is already in use."},
+            )
+        return attrs
+
+
 class EditPdfDocumentsSerializer(DocumentListSerializer, SourceModeValidationMixin):
     operations = serializers.ListField(
         child=PdfEditOperationSerializer(),

@@ -1985,6 +1985,54 @@ describe('DocumentDetailComponent', () => {
     expect(closeSpy).toHaveBeenCalled()
   })
 
+  it('extracts selected pages through the no-OCR endpoint and refreshes the source', () => {
+    let modal: NgbModalRef
+    modalService.activeInstances.subscribe(
+      (instances) => (modal = instances[0])
+    )
+    initNormally()
+    component.selectedVersionId.set(10)
+    component.document().versions = [
+      { id: 10, is_root: false, checksum: 'version-10' },
+      { id: doc.id, is_root: true },
+    ]
+    component.metadata.update((metadata) => ({
+      ...metadata,
+      archived_checksum: 'other-file',
+    }))
+    component.editPdf()
+    const editor = modal.componentInstance
+    editor.totalPages = 3
+    editor.pages = [
+      { page: 3, rotate: 90, splitAfter: false, selected: true },
+      { page: 1, rotate: 0, splitAfter: false, selected: false },
+    ]
+    editor.extractionMode = 'extract'
+    editor.extractedTitle = 'Water notice'
+    editor.extractedAsn = 1000002
+    const refresh = jest
+      .spyOn(component as any, 'loadDocument')
+      .mockImplementation(() => {})
+    editor.confirm()
+    const request = httpTestingController.expectOne(
+      `${environment.apiBaseUrl}documents/${doc.id}/split_pages/`
+    )
+    expect(request.request.body).toEqual({
+      operations: [{ page: 3, rotate: 90 }],
+      move: false,
+      source_document_id: 10,
+      source_checksum: 'version-10',
+      keep_only_current_file: true,
+      title: 'Water notice',
+      archive_serial_number: 1000002,
+    })
+    httpTestingController.expectNone(
+      `${environment.apiBaseUrl}documents/edit_pdf/`
+    )
+    request.flush({ document_id: doc.id, new_document_id: 123 })
+    expect(refresh).toHaveBeenCalledWith(doc.id, true)
+  })
+
   it('submits selected-version page edits and an appended scan atomically, then refreshes the same root', () => {
     let modal: NgbModalRef
     modalService.activeInstances.subscribe(

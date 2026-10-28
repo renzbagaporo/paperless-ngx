@@ -129,6 +129,12 @@ class LlamaParseDocumentParser(RemoteDocumentParser):
             if page_count == 0:
                 raise ParseError("Cannot OCR a PDF with no pages")
             result = self._request_result(source, config)
+            self.page_provenance = {
+                "engine": "llamaparse",
+                "tier": "agentic",
+                "version": "latest",
+                "job_id": result.get("job", {}).get("id"),
+            }
             pages = self._validated_pages(result, page_count)
             self._review_pages = pages
             self._text = "\n\n".join(page["text"] for page in pages if page["text"])

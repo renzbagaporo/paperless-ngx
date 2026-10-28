@@ -460,6 +460,17 @@ def update_document_content_maybe_archive_file(
     *,
     remote_ocr: bool = False,
 ) -> None:
+    document = Document.objects.get(pk=document_id)
+    root_id = document.root_document_id or document.pk
+    with FileLock(settings.DATA_DIR / f"document-file-{root_id}.lock"):
+        _update_document_content_maybe_archive_file(document_id, remote_ocr=remote_ocr)
+
+
+def _update_document_content_maybe_archive_file(
+    document_id,
+    *,
+    remote_ocr: bool = False,
+) -> None:
     """
     Re-creates OCR content and thumbnail for a document, and archive file if
     it exists.
@@ -574,6 +585,22 @@ def update_document_content_maybe_archive_file(
                         create_source_path_directory(document.archive_path)
                         shutil.move(parser.get_archive_path(), document.archive_path)
                     shutil.move(thumbnail, document.thumbnail_path)
+
+                    if (
+                        document.mime_type == "application/pdf"
+                        or document.has_archive_version
+                    ):
+                        from documents.page_data import parser_pages
+                        from documents.page_data import save_pages
+
+                        document.refresh_from_db()
+                        save_pages(
+                            document,
+                            parser_pages(
+                                parser,
+                                document.archive_path or document.source_path,
+                            ),
+                        )
 
             document.refresh_from_db()
             logger.info(

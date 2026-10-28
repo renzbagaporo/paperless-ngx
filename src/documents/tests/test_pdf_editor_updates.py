@@ -315,7 +315,7 @@ class PdfEditorUpdateTests(DirectoriesMixin, TestCase):
     def test_text_extraction_failure_retains_file_and_thumbnail(self):
         old = self.root.source_path
         with mock.patch(
-            "documents.file_updates.run_subprocess",
+            "documents.page_data.run_subprocess",
             side_effect=OSError("disk full"),
         ):
             with self.assertRaises(OSError):

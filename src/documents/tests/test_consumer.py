@@ -171,6 +171,46 @@ class TestConsumer(
     GetConsumerMixin,
     TestCase,
 ):
+    @mock.patch("documents.consumer.get_parser_registry")
+    def test_rich_parsing_is_saved_for_consume_folder_and_api_upload(self, registry):
+        from documents.tests.test_page_data import response
+        from paperless.parsers.llamaparse import LlamaParseDocumentParser
+
+        class RichParser(DummyParser):
+            def get_review_pages(self):
+                import pikepdf
+
+                with pikepdf.open(self._archive) as pdf:
+                    count = len(pdf.pages)
+                result = response()
+                for field in ("text", "markdown", "items"):
+                    page = result[field]["pages"][0]
+                    result[field]["pages"] = [
+                        {**page, "page_number": number}
+                        for number in range(1, count + 1)
+                    ]
+                return LlamaParseDocumentParser._validated_pages(result, count)
+
+        registry.return_value.get_parser_for_file.return_value = RichParser
+        for source in (DocumentSource.ConsumeFolder, DocumentSource.ApiUpload):
+            upload = settings.CONSUMPTION_DIR / f"{source.name}.pdf"
+            shutil.copy(DummyParser._ARCHIVE_SRC, upload)
+            # Distinct embedded PDF metadata avoids exact duplicate detection.
+            import pikepdf
+
+            with pikepdf.open(upload, allow_overwriting_input=True) as pdf:
+                pdf.docinfo["/Title"] = source.name
+                pdf.save(upload)
+            with self.get_consumer(upload, source=source) as consumer:
+                result = consumer.run()
+            document = Document.objects.get(pk=result["document_id"])
+            page = document.parsed_pages.first()
+            self.assertEqual(
+                page.markdown,
+                response()["markdown"]["pages"][0]["markdown"],
+            )
+            self.assertEqual(page.layout["items"][0]["rows"], [["5", "10"]])
+
     def _assert_first_last_send_progress(
         self,
         first_status=ProgressStatusOptions.STARTED,
@@ -1075,7 +1115,19 @@ class TestConsumer(
             Path(__file__).parent / "samples" / "simple-noalpha.png",
             settings.CONSUMPTION_DIR / "simple.png.pdf",
         )
-        m.return_value.get_parser_for_file.return_value = CopyParser
+
+        class SearchableCopyParser(CopyParser):
+            def parse(self, document_path, mime_type, *, produce_archive=True):
+                super().parse(document_path, mime_type, produce_archive=produce_archive)
+                # These naming fixtures include image bytes with a .pdf suffix.
+                # A parser's archive must be a real PDF for page extraction.
+                if self._archive and self._archive.read_bytes()[:4] != b"%PDF":
+                    from PIL import Image
+
+                    with Image.open(document_path) as image:
+                        image.convert("RGB").save(self._archive, "PDF")
+
+        m.return_value.get_parser_for_file.return_value = SearchableCopyParser
 
         with self.get_consumer(settings.CONSUMPTION_DIR / "simple.png") as consumer:
             consumer.run()

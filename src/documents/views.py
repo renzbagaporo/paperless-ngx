@@ -215,6 +215,7 @@ from documents.serialisers import SearchResultSerializer
 from documents.serialisers import SerializerWithPerms
 from documents.serialisers import ShareLinkBundleSerializer
 from documents.serialisers import ShareLinkSerializer
+from documents.serialisers import SplitPagesSerializer
 from documents.serialisers import StoragePathSerializer
 from documents.serialisers import StoragePathTestSerializer
 from documents.serialisers import TagSerializer
@@ -2372,6 +2373,77 @@ class DocumentViewSet(
     )
     def replace_file(self, request, pk=None):
         return self._queue_file_update(request, pk, append=False)
+
+    @extend_schema(responses={200: OpenApiTypes.OBJECT})
+    @action(methods=["get"], detail=True, permission_classes=[IsAuthenticated])
+    def page_data(self, request, pk=None):
+        from documents.file_updates import resolve_file_update_source
+        from documents.page_data import checksum
+        from documents.page_data import stored_pages
+
+        root = self._get_root_doc_for_version_action(pk)
+        if not request.user.has_perm(
+            "documents.view_document",
+        ) or not has_perms_owner_aware(request.user, "view_document", root):
+            return HttpResponseForbidden("Insufficient permissions")
+        try:
+            version_id = request.query_params.get("version")
+            source = resolve_file_update_source(
+                root,
+                int(version_id) if version_id else None,
+                source_mode="explicit_selection" if version_id else "latest_version",
+            )
+        except (ValueError, Document.DoesNotExist):
+            return Response({"detail": "Invalid document version."}, status=400)
+        pages = stored_pages(source)
+        return Response(
+            {
+                "document_id": root.pk,
+                "source_document_id": source.pk,
+                "file_checksum": checksum(source),
+                "available": pages is not None,
+                "pages": [
+                    {"page": index, **page, "origin": str(page["origin"])}
+                    for index, page in enumerate(pages or [], 1)
+                ],
+            },
+        )
+
+    @extend_schema(request=SplitPagesSerializer, responses={200: OpenApiTypes.OBJECT})
+    @action(methods=["post"], detail=True, permission_classes=[IsAuthenticated])
+    def split_pages(self, request, pk=None):
+        from django.db import IntegrityError
+
+        from documents.file_updates import searchable_checksum
+        from documents.page_splitting import split_pages
+
+        serializer = SplitPagesSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        root = self._get_root_doc_for_version_action(pk)
+        current = get_latest_version_for_root(root)
+        try:
+            result = split_pages(
+                root.pk,
+                user_id=request.user.pk,
+                source_mode="explicit_selection"
+                if "source_document_id" in serializer.validated_data
+                else "latest_version",
+                expected_current_document_id=current.pk,
+                expected_current_checksum=searchable_checksum(current),
+                **serializer.validated_data,
+            )
+        except PermissionError as error:
+            return Response({"detail": str(error)}, status=403)
+        except (ValueError, Document.DoesNotExist, IntegrityError) as error:
+            return Response(
+                {
+                    "detail": "Invalid or conflicting document selection."
+                    if isinstance(error, IntegrityError)
+                    else str(error),
+                },
+                status=400,
+            )
+        return Response(result)
 
     def _get_root_doc_for_version_action(self, pk) -> Document:
         try:

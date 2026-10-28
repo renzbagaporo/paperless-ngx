@@ -1937,8 +1937,8 @@ export class DocumentDetailComponent
     )
     const sourceChecksum =
       source?.archive_checksum ||
-      this.metadata()?.archived_checksum ||
       source?.checksum ||
+      this.metadata()?.archived_checksum ||
       this.metadata()?.original_checksum
     modal.componentInstance.title = $localize`PDF Editor`
     modal.componentInstance.btnCaption = $localize`Proceed`
@@ -1955,6 +1955,40 @@ export class DocumentDetailComponent
       .subscribe(() => {
         const editor = modal.componentInstance as PDFEditorComponent
         editor.buttonsEnabled.set(false)
+        if (editor.extractionMode) {
+          this.documentsService
+            .splitPages(rootId, {
+              operations: editor.getSelectedOperations(),
+              move: editor.extractionMode === 'move',
+              source_document_id: sourceDocumentId,
+              source_checksum: sourceChecksum,
+              keep_only_current_file: editor.keepOnlyCurrentFile,
+              ...(editor.extractedTitle.trim()
+                ? { title: editor.extractedTitle.trim() }
+                : {}),
+              ...(editor.extractedAsn !== null
+                ? { archive_serial_number: editor.extractedAsn }
+                : {}),
+            })
+            .pipe(first(), takeUntil(this.unsubscribeNotifier))
+            .subscribe({
+              next: () => {
+                modal.close()
+                this.toastService.showInfo(
+                  $localize`Selected pages saved to a new document.`
+                )
+                this.loadDocument(rootId, true)
+              },
+              error: (error) => {
+                editor.buttonsEnabled.set(true)
+                this.toastService.showError(
+                  $localize`Error extracting pages`,
+                  error
+                )
+              },
+            })
+          return
+        }
         const update = editor.editMode === PdfEditorEditMode.Update
         const request = {
           operations: editor.getOperations(),

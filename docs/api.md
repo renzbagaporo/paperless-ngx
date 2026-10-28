@@ -287,6 +287,103 @@ Splitting creates new document IDs and cannot be combined with appending.
 only the current file requires an explicit acknowledgement of history
 removal. The ordinary **Add a file version** action remains available.
 
+### Per-page parsing and extraction
+
+New imports and file updates retain per-page plain text, Markdown and layout
+items returned by LlamaParse. Local PDF text extraction supplies text-only
+records when rich parsing is unavailable. Each record belongs to an exact
+searchable-file checksum. Reorder, rotate, delete and append operations preserve
+the corresponding records. Layout coordinates refer to the parsed page;
+`rotation` tracks clockwise rotation, modulo 360 degrees. Subtract
+`provenance.layout_rotation` (default zero) to transform layout coordinates
+from the parsing orientation to the current orientation.
+
+`GET /api/documents/{id}/page_data/` returns the latest file's page records.
+An optional `version` query parameter selects a file version belonging to the
+same root. The response contains `source_document_id`, `file_checksum`,
+`available` and `pages`. Missing or stale records produce `available=false`;
+the read endpoint never starts OCR or backfill. Document view permissions apply.
+Text-only pages have null `markdown` and `layout`. Provider image download URLs
+are excluded from retained layout data; extracted image files are not stored.
+
+`POST /api/documents/{id}/split_pages/` copies selected searchable pages to a
+new document without invoking a parser. Send, for example:
+
+```json
+{
+  "operations": [{"page": 3, "rotate": 90}, {"page": 1}],
+  "source_document_id": 42,
+  "source_checksum": "<file_checksum from page_data>",
+  "move": false,
+  "title": "Selected water notices",
+  "archive_serial_number": 1000002,
+  "keep_only_current_file": true
+}
+```
+
+The response contains `document_id` and `new_document_id`. Page numbers are
+one-based and must be unique. The source checksum is required. Omit the ASN to
+leave the new document's ASN unset. An occupied ASN is rejected. Ownership,
+object permissions, tags, custom fields and classification metadata are copied;
+notes and share links remain on the source. A provenance note identifies the
+source file and selected pages on the new document.
+
+Set `move=true` to remove the selected pages from the source in the same
+transaction. Moving every page is rejected. View and add permissions are
+required for extraction; moving also requires change permission and, when
+discarding history, delete permission. Root identity and ASN are preserved.
+File history retains its matching parsing data; keeping only the current file
+removes obsolete versions and their parsing data after commit.
+
+In **Actions → PDF Editor**, select pages and choose **Copy selected pages to a
+new document** or **Move selected pages to a new document** from **Selected
+pages**. These actions preserve existing OCR and rich parsing. Append cannot be
+combined with extraction. The upstream scissors/create workflow is separate.
+
+### Migrating and enriching existing documents
+
+Back up the database and media together before deploying the schema migration.
+The schema migration only creates the page-data table; it does not change
+documents, files or searchable content and does not invoke OCR. A local backfill
+recovers text from existing searchable PDFs, including retained file versions.
+It cannot recover the discarded Markdown or layout. Preview first, then apply
+inside the Paperless runtime:
+
+```sh
+python manage.py document_page_data backfill
+python manage.py document_page_data backfill --apply
+```
+
+Backfill is resumable, skips complete current records, checks file checksums and
+page counts, and reports damaged or missing files without losing successes.
+An optional repeated `--document` argument limits the selected documents.
+
+Rich parsing can be added later without resetting documents or rewriting PDF
+files. Enrichment processes one missing page at a time, preserving IDs, ASNs,
+metadata, embedded PDF text and document-level searchable content. Rich text is
+available through the page-data endpoint; later page edits rebuild searchable
+content from the retained page records. Preview the missing page count before
+explicitly authorizing a bounded number of paid pages:
+
+```sh
+python manage.py document_page_data enrich
+python manage.py document_page_data enrich --apply --max-pages 10
+```
+
+Enrichment uses the configured LlamaParse engine and key. It saves each success
+immediately, skips already enriched pages on rerun, and stops on any error,
+including exhausted credits. A rerun resumes from missing pages. The page limit
+is shared across the selected documents. Default selection enriches only the
+latest file per root; `--include-history` includes retained versions. A crash
+after the provider finishes but before the database commit can still require a
+repeat provider call; billing is not guaranteed to be exactly once.
+
+Both ordinary and split-manifest exports include page parsing records. Restoring
+from Trash preserves the matching page data; permanent deletion removes it.
+Restore database and media from the same backup to roll back a deployment. Reversing
+the schema migration preserves documents but drops the page-data table, so it
+discards newly retained parsing results.
+
 ## Permissions
 
 All objects (documents, tags, etc.) allow setting object-level permissions

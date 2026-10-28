@@ -781,6 +781,22 @@ class ConsumerPlugin(
                         # This triggers things like file renaming
                         document.save()
 
+                        # Persist provider evidence before the parser context closes.
+                        if (
+                            document.mime_type == "application/pdf"
+                            or document.has_archive_version
+                        ):
+                            from documents.page_data import parser_pages
+                            from documents.page_data import save_pages
+
+                            save_pages(
+                                document,
+                                parser_pages(
+                                    document_parser,
+                                    document.archive_path or document.source_path,
+                                ),
+                            )
+
                         if document.root_document_id:
                             document_updated.send(
                                 sender=self.__class__,

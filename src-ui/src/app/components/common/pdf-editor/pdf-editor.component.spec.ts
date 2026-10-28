@@ -11,6 +11,44 @@ describe('PDFEditorComponent', () => {
   let component: PDFEditorComponent
   let fixture: ComponentFixture<PDFEditorComponent>
 
+  it('extracts selected pages in displayed order with their rotations', () => {
+    component.totalPages = 3
+    component.pages = [
+      { page: 3, rotate: 90, splitAfter: false, selected: true },
+      { page: 1, rotate: 0, splitAfter: false, selected: false },
+      { page: 2, rotate: 180, splitAfter: false, selected: true },
+    ]
+    component.extractionMode = 'extract'
+    expect(component.canSubmit).toBe(true)
+    expect(component.getSelectedOperations()).toEqual([
+      { page: 3, rotate: 90 },
+      { page: 2, rotate: 180 },
+    ])
+    component.onAppendFileSelected({
+      target: { files: [new File(['scan'], 'new.pdf')], value: 'new.pdf' },
+    } as unknown as Event)
+    expect(component.appendFile).toBeNull()
+    component.deselectAll()
+    expect(component.canSubmit).toBe(false)
+  })
+
+  it('prevents moving all pages and requires confirmation to discard history', () => {
+    component.totalPages = 2
+    component.pages = [
+      { page: 1, rotate: 0, splitAfter: false, selected: true },
+      { page: 2, rotate: 0, splitAfter: false, selected: true },
+    ]
+    component.extractionMode = 'move'
+    component.configureRetention(true)
+    component.fileRemovalConfirmed = true
+    expect(component.canSubmit).toBe(false)
+    component.pages[1].selected = false
+    component.fileRemovalConfirmed = false
+    expect(component.canSubmit).toBe(false)
+    component.fileRemovalConfirmed = true
+    expect(component.canSubmit).toBe(true)
+  })
+
   beforeEach(async () => {
     await TestBed.configureTestingModule({
       imports: [PDFEditorComponent, NgxBootstrapIconsModule.pick(allIcons)],

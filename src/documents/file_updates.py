@@ -27,10 +27,10 @@ from documents.caching import clear_document_caches
 from documents.file_handling import generate_unique_filename
 from documents.file_handling import validate_path_in_root
 from documents.models import Document
+from documents.page_data import pages_for_file
 from documents.parsers import make_thumbnail_from_pdf
 from documents.signals import document_updated
 from documents.utils import compute_checksum
-from documents.utils import run_subprocess
 from documents.versioning import get_latest_version_for_root
 from paperless.config import RemoteOCRConfig
 from paperless.parsers import ParserContext
@@ -157,6 +157,7 @@ def _install(
     reason: str,
     rollback: list,
     actor=None,
+    pages: list[dict] | None = None,
 ) -> Document:
     """Called with the root row and MEDIA_LOCK held, in an atomic transaction."""
     from auditlog.models import LogEntry
@@ -245,6 +246,10 @@ def _install(
     )
     transaction.on_commit(lambda: _publish(root.pk, old_ids), robust=True)
     target.refresh_from_db()
+    if pages is not None:
+        from documents.page_data import save_pages
+
+        save_pages(target, pages)
     return target
 
 
@@ -352,16 +357,6 @@ def _edit_pdf_pages(source: Path, target: Path, operations: list[dict]) -> None:
         edited.save(target)
 
 
-def _edited_pdf_text(source: Path, work: Path) -> str:
-    """Extract the retained text layer; PDF edits never run an OCR engine."""
-    output = work / "edited_text.txt"
-    run_subprocess(
-        ["pdftotext", "-q", "-layout", "-enc", "UTF-8", str(source), str(output)],
-        logger=logger,
-    )
-    return output.read_text(encoding="utf-8", errors="replace").strip()
-
-
 def update_file(
     root_id: int,
     uploaded_file: Path | None,
@@ -412,6 +407,7 @@ def update_file(
             new_text = ""
             new_thumbnail = None
             checks = None
+            new_pages = []
             if uploaded_file:
                 parser_class = get_parser_registry().get_parser_for_file(
                     mime_type,
@@ -433,6 +429,9 @@ def update_file(
                     else _pdf_source(uploaded_file, mime_type, work)
                 )
                 new_text = parser.get_text()
+                from documents.page_data import parser_pages
+
+                new_pages = parser_pages(parser, new_pdf)
                 from documents.ingestion_checks import collect_ingestion_checks
 
                 checks = collect_ingestion_checks(parser, new_text)
@@ -463,6 +462,7 @@ def update_file(
                     text = new_text
                     thumbnail = Path(new_thumbnail) if new_thumbnail else None
                     retained_count = 0
+                    pages = new_pages
                     if append or uploaded_file is None:
                         current = latest.archive_path or latest.source_path
                         current_mime = (
@@ -471,10 +471,15 @@ def update_file(
                             else latest.mime_type
                         )
                         current = _pdf_source(current, current_mime, work)
+                        from documents.page_data import selected_pages
+
+                        retained_pages = pages_for_file(latest, current)
                         if operations is not None:
                             edited = work / "edited.pdf"
                             _edit_pdf_pages(current, edited, operations)
                             current = edited
+                            retained_pages = selected_pages(retained_pages, operations)
+                        pages = retained_pages + new_pages
                         with pikepdf.open(current) as retained:
                             retained_count = len(retained.pages)
                         if uploaded_file is None:
@@ -493,7 +498,9 @@ def update_file(
                             )
                             thumbnail = latest.thumbnail_path
                         else:
-                            text = _edited_pdf_text(result, work)
+                            from documents.page_data import joined_text
+
+                            text = joined_text(pages)
                             thumbnail = make_thumbnail_from_pdf(result, work)
                     with pikepdf.open(result) as document_pdf:
                         count = len(document_pdf.pages)
@@ -515,6 +522,7 @@ def update_file(
                         else ("Pages appended" if append else "File replaced"),
                         rollback=rollback,
                         actor=user,
+                        pages=pages,
                     )
                     if checks is not None:
                         from documents.ingestion_checks import apply_ingestion_checks
@@ -563,6 +571,7 @@ def compact_current_files(root_id: int) -> None:
                 keep_only_current_file=True,
                 reason="Stored current file only",
                 rollback=rollback,
+                pages=pages_for_file(current, source),
             )
 
 

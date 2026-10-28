@@ -26,7 +26,7 @@
         type="file"
         accept="application/pdf,image/png,image/jpeg,image/tiff,image/bmp,image/gif,image/webp"
         (change)="onAppendFileSelected($event)"
-        [disabled]="hasSplit() || !buttonsEnabled()"
+        [disabled]="hasSplit() || !!extractionMode || !buttonsEnabled()"
       />
       @if (hasSplit()) {
         <p class="form-text mb-0" i18n>
@@ -61,6 +61,46 @@
           <option [ngValue]="false" i18n>Local OCR</option>
           <option [ngValue]="true" i18n>Configured remote OCR</option>
         </select>
+      }
+    </div>
+    <div class="border rounded p-3 mb-3">
+      <label class="form-label" for="pageExtraction" i18n>Selected pages</label>
+      <select
+        id="pageExtraction"
+        class="form-select"
+        [(ngModel)]="extractionMode"
+        [disabled]="!!appendFile"
+      >
+        <option [ngValue]="null" i18n>Edit document</option>
+        <option value="extract" i18n>
+          Copy selected pages to a new document
+        </option>
+        <option value="move" i18n>Move selected pages to a new document</option>
+      </select>
+      @if (extractionMode) {
+        <p class="form-text" i18n>
+          The selected pages retain their existing OCR and parsing. No OCR is
+          run.
+        </p>
+        <label class="form-label" for="extractedTitle" i18n
+          >New document title</label
+        >
+        <input
+          id="extractedTitle"
+          class="form-control mb-2"
+          [(ngModel)]="extractedTitle"
+        />
+        <label class="form-label" for="extractedAsn" i18n
+          >New document ASN (optional)</label
+        >
+        <input
+          id="extractedAsn"
+          type="number"
+          min="0"
+          max="4294967295"
+          class="form-control"
+          [(ngModel)]="extractedAsn"
+        />
       }
     </div>
     <div class="btn-toolbar mb-2">
@@ -218,35 +258,37 @@
   <div
     class="d-flex flex-column flex-md-row flex-wrap w-100 gap-3 align-items-center"
   >
-    <div class="btn-group" role="group">
-      <input
-        type="radio"
-        class="btn-check"
-        [(ngModel)]="editMode"
-        [value]="PdfEditorEditMode.Create"
-        id="editModeCreate"
-        name="editmode"
-        [disabled]="!!appendFile || !buttonsEnabled()"
-      />
-      <label for="editModeCreate" class="btn btn-outline-primary btn-sm">
-        <i-bs name="plus"></i-bs>
-        <span class="form-check-label ms-1" i18n>Create new document(s)</span>
-      </label>
-      <input
-        type="radio"
-        class="btn-check"
-        [(ngModel)]="editMode"
-        [value]="PdfEditorEditMode.Update"
-        id="editModeUpdate"
-        name="editmode"
-        [disabled]="hasSplit() || !buttonsEnabled()"
-      />
-      <label for="editModeUpdate" class="btn btn-outline-primary btn-sm">
-        <i-bs name="pencil"></i-bs>
-        <span class="form-check-label ms-2" i18n>Update this document</span>
-      </label>
-    </div>
-    @if (editMode === PdfEditorEditMode.Create) {
+    @if (!extractionMode) {
+      <div class="btn-group" role="group">
+        <input
+          type="radio"
+          class="btn-check"
+          [(ngModel)]="editMode"
+          [value]="PdfEditorEditMode.Create"
+          id="editModeCreate"
+          name="editmode"
+          [disabled]="!!appendFile || !buttonsEnabled()"
+        />
+        <label for="editModeCreate" class="btn btn-outline-primary btn-sm">
+          <i-bs name="plus"></i-bs>
+          <span class="form-check-label ms-1" i18n>Create new document(s)</span>
+        </label>
+        <input
+          type="radio"
+          class="btn-check"
+          [(ngModel)]="editMode"
+          [value]="PdfEditorEditMode.Update"
+          id="editModeUpdate"
+          name="editmode"
+          [disabled]="hasSplit() || !buttonsEnabled()"
+        />
+        <label for="editModeUpdate" class="btn btn-outline-primary btn-sm">
+          <i-bs name="pencil"></i-bs>
+          <span class="form-check-label ms-2" i18n>Update this document</span>
+        </label>
+      </div>
+    }
+    @if (!extractionMode && editMode === PdfEditorEditMode.Create) {
       <div class="form-group d-flex">
         <div class="form-check">
           <input
@@ -273,7 +315,10 @@
         </div>
       </div>
     }
-    @if (editMode === PdfEditorEditMode.Update) {
+    @if (
+      (!extractionMode && editMode === PdfEditorEditMode.Update) ||
+      extractionMode === 'move'
+    ) {
       <div class="form-group">
         <p class="small mb-2" i18n>
           The document ID, serial number and metadata stay the same.

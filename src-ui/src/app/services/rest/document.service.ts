@@ -440,6 +440,24 @@ export class DocumentService extends AbstractPaperlessService<Document> {
     )
   }
 
+  splitPages(
+    id: number,
+    request: {
+      operations: { page: number; rotate?: number }[]
+      move: boolean
+      source_document_id: number
+      source_checksum: string
+      keep_only_current_file: boolean
+      title?: string
+      archive_serial_number?: number
+    }
+  ) {
+    return this.http.post<{ document_id: number; new_document_id: number }>(
+      this.getResourceUrl(id, 'split_pages'),
+      request
+    )
+  }
+
   removePasswordDocuments(
     ids: number[],
     request: RemovePasswordDocumentsRequest

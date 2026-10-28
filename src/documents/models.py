@@ -990,6 +990,45 @@ class Note(SoftDeleteModel):
         return self.note
 
 
+class DocumentPage(SoftDeleteModel):
+    """Page-local parsing, bound to a document's exact searchable file revision."""
+
+    document = models.ForeignKey(
+        Document,
+        related_name="parsed_pages",
+        on_delete=models.CASCADE,
+    )
+    page = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    file_checksum = models.CharField(max_length=64)
+    origin = models.UUIDField(default=uuid.uuid4, editable=False)
+    source_page = models.PositiveIntegerField(validators=[MinValueValidator(1)])
+    rotation = models.PositiveSmallIntegerField(default=0)
+    text = models.TextField(blank=True)
+    markdown = models.TextField(null=True, blank=True)
+    layout = models.JSONField(null=True, blank=True)
+    provenance = models.JSONField(default=dict)
+
+    class Meta:
+        ordering = ("page",)
+        constraints = [
+            models.UniqueConstraint(
+                fields=["document", "page"],
+                name="documents_page_position_uniq",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(page__gte=1, source_page__gte=1),
+                name="documents_page_positive",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(rotation__in=[0, 90, 180, 270]),
+                name="documents_page_rotation",
+            ),
+        ]
+
+    def __str__(self):
+        return f"Document {self.document_id}, page {self.page}"
+
+
 class DocumentBarcode(models.Model):
     """
     A barcode found in a document during consumption, kept so its content

@@ -21,7 +21,9 @@ from django.contrib.auth.models import Permission
 from django.contrib.contenttypes.models import ContentType
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.core.management.color import no_style
 from django.db import IntegrityError
+from django.db import connection
 from django.test import TestCase
 from django.test import override_settings
 from django.utils import timezone
@@ -34,6 +36,7 @@ from documents.models import CustomField
 from documents.models import CustomFieldInstance
 from documents.models import Document
 from documents.models import DocumentBarcode
+from documents.models import DocumentPage
 from documents.models import DocumentType
 from documents.models import Note
 from documents.models import ShareLink
@@ -77,6 +80,7 @@ class TestExportImport(
         self.group1 = Group.objects.create(name="group1")
 
         self.d1 = Document.objects.create(
+            pk=1,
             content="Content",
             checksum="1093cf6e32adbd16b06969df09215d42c4a3a8938cc18b39455953f08d1ff2ab",
             archive_checksum="706124ecde3c31616992fa979caed17a726b1c9ccdba70e82a4ff796cea97ccf",
@@ -86,6 +90,7 @@ class TestExportImport(
             archive_filename="0000001.pdf",
         )
         self.d2 = Document.objects.create(
+            pk=2,
             content="Content",
             checksum="550d1bae0f746d4f7c6be07054eb20cc2f11988a58ef64ceae45e98f85e92a5b",
             title="wow2",
@@ -93,6 +98,7 @@ class TestExportImport(
             mime_type="application/pdf",
         )
         self.d3 = Document.objects.create(
+            pk=3,
             content="Content",
             checksum="f1ba6b7ff8548214a75adec228f5468a14fe187f445bc0b9485cbf1c35b15915",
             title="wow2",
@@ -100,12 +106,19 @@ class TestExportImport(
             mime_type="application/pdf",
         )
         self.d4 = Document.objects.create(
+            pk=4,
             content="Content",
             checksum="a81b16b6b313cfd7e60eb7b12598d1343b58622b4030cfa19a2724a02e98db1b",
             title="wow_dec",
             filename="0000004.pdf",
             mime_type="application/pdf",
         )
+
+        # The sample media uses document IDs 1..4. Explicit IDs do not advance
+        # PostgreSQL sequences, so make later automatic inserts start after them.
+        with connection.cursor() as cursor:
+            for statement in connection.ops.sequence_reset_sql(no_style(), [Document]):
+                cursor.execute(statement)
 
         self.note = Note.objects.create(
             note="This is a note. amaze.",
@@ -872,6 +885,21 @@ class TestExportImport(
         )
         DocumentBarcodeFactory(document=self.d1, value="https://example.com")
         DocumentBarcodeFactory(document=self.d2, page=2, value="DE8937")
+        page = DocumentPage.objects.create(
+            document=self.d1,
+            page=1,
+            source_page=3,
+            file_checksum=self.d1.archive_checksum or self.d1.checksum,
+            text="Water notice",
+            markdown="# Water notice",
+            layout={"items": [{"type": "table", "rows": [["Water", "10"]]}]},
+            provenance={"engine": "llamaparse"},
+            rotation=90,
+        )
+        expected_page = {
+            field.attname: getattr(page, field.attname)
+            for field in page._meta.concrete_fields
+        }
 
         self._do_export(split_manifest=split_manifest)
 
@@ -887,6 +915,14 @@ class TestExportImport(
             self.assertEqual(
                 set(DocumentBarcode.objects.values_list("document", "page", "value")),
                 {(self.d1.pk, 1, "https://example.com"), (self.d2.pk, 2, "DE8937")},
+            )
+            restored = DocumentPage.objects.get(pk=page.pk)
+            self.assertEqual(
+                {
+                    field.attname: getattr(restored, field.attname)
+                    for field in restored._meta.concrete_fields
+                },
+                expected_page,
             )
 
     def test_export_import_barcodes(self) -> None:
@@ -1586,7 +1622,7 @@ class TestExportDerivedFileNameCollisions:
         """
         GIVEN:
             - Two documents with the same created date and the same title
-            - The title alone is longer than 255 bytes and contains umlauts
+            - The title is 128 characters but longer than 255 UTF-8 bytes
         WHEN:
             - The exporter runs
         THEN:
@@ -1606,7 +1642,7 @@ class TestExportDerivedFileNameCollisions:
             )
             DocumentFactory(
                 pk=pk,
-                title="Bestellbestätigung " * 15,
+                title="Ä" * 128,
                 created=date(2026, 10, 15),
                 filename=f"{pk:07}.pdf",
                 archive_filename=f"{pk:07}.pdf",

@@ -60,6 +60,15 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
   fileRemovalConfirmed = false
   appendFile: File | null = null
   remoteOcr = false
+  extractionMode: 'extract' | 'move' | null = null
+  extractedTitle = ''
+  extractedAsn: number | null = null
+
+  getSelectedOperations() {
+    return this.pages
+      .filter((page) => page.selected)
+      .map((page) => ({ page: page.page, rotate: page.rotate }))
+  }
 
   configureRetention(canDelete: boolean) {
     this.canRemoveEarlierFiles = canDelete
@@ -70,7 +79,13 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
     const input = event.target as HTMLInputElement
     const file = input.files?.[0]
     input.value = ''
-    if (!file || this.hasSplit() || !this.buttonsEnabled()) return
+    if (
+      !file ||
+      this.hasSplit() ||
+      this.extractionMode ||
+      !this.buttonsEnabled()
+    )
+      return
     this.appendFile = file
     this.editMode = PdfEditorEditMode.Update
   }
@@ -80,6 +95,17 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
   }
 
   get canSubmit(): boolean {
+    if (this.extractionMode) {
+      return (
+        this.buttonsEnabled() &&
+        this.hasSelection() &&
+        !this.appendFile &&
+        (this.extractionMode !== 'move' ||
+          (this.getSelectedOperations().length < this.totalPages &&
+            (!this.keepOnlyCurrentFile ||
+              (this.canRemoveEarlierFiles && this.fileRemovalConfirmed))))
+      )
+    }
     return (
       this.buttonsEnabled() &&
       (this.pages.length > 0 || !!this.appendFile) &&
