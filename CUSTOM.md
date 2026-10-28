@@ -1,7 +1,9 @@
 # Custom Paperless-ngx
 
-This fork starts at upstream **v3.3.4**. `stable/3.3.4` preserves the release
-commit; `custom` is this repository's default branch and carries the changes.
+This fork starts at upstream **v3.3.4**. `stable` records the last integrated
+upstream release; `personal` is the default branch and carries the additions.
+Future release updates merge an upstream stable tag into a review branch from
+`personal`. Advance `stable` to that upstream tag after the update is accepted.
 
 The document file controls support an ongoing collection such as “Water Supply
 Notices”: new scans become additional searchable pages under the existing
@@ -101,7 +103,10 @@ docker build \
 
 The **Build custom image** workflow can build the same image on GitHub. Its
 `publish` option defaults to false. When enabled, the workflow publishes
-`ghcr.io/renzbagaporo/paperless-ngx:custom` and a commit-specific tag.
+`ghcr.io/renzbagaporo/paperless-ngx:personal` and a commit-specific
+`personal-<full-commit-sha>` tag. Deployments pin the commit-specific tag.
+The optional `revision` input selects the source commit independently of the
+workflow revision, so a reviewed commit can be built after workflow updates.
 
 Use this image with the existing Paperless deployment configuration. This fork
 does not automatically deploy or reset any instance.

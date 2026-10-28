@@ -51,16 +51,16 @@ PATTERNS = (
     ("slash", r"(?<!\d)(\d{1,2})/(\d{1,2})/(\d{4})(?!\d)"),
     (
         "d_month_y",
-        r"(?<!\d)(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})(?!\d)",
+        r"(?<!\d)(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})(?!\d)",  # codespell:ignore nd
     ),
     (
         "month_d_y",
-        r"\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?!\d)",
+        r"\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?!\d)",  # codespell:ignore nd
     ),
 )
 LABEL = re.compile(
     r"(?P<issue>\b(?:issue date|date of issue|date issued|issued|invoice date|document date|created on)\b|発行年月日|発行日|作成日|通知日|交付年月日|交付日|請求日)"
-    r"|(?P<other>\b(?:due(?: date)?|payment date|pay(?:ment)? by|birth(?: date)?|date of birth|dob|expiry|expiration|valid until|period)\b|生年月日|誕生日|支払期限|納期限|納付期限|有効期限|対象期間)",
+    r"|(?P<other>\b(?:due(?: date)?|payment date|pay(?:ment)? by|birth(?: date)?|date of birth|dob|expiry|expiration|valid until|period)\b|生年月日|誕生日|支払期限|納期限|納付期限|有効期限|対象期間)",  # codespell:ignore ment
     re.IGNORECASE,
 )
 
