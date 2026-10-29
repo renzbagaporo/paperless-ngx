@@ -14,7 +14,7 @@ from unittest import mock
 import personal_release as policy
 
 REPOSITORY = "renzbagaporo/paperless-ngx"
-TAG = "personal-v3.3.4-1"
+TAG = "paperless-3.3.4-1"
 
 
 class PersonalReleaseTests(unittest.TestCase):
@@ -129,11 +129,13 @@ class PersonalReleaseTests(unittest.TestCase):
     def test_only_safe_final_release_tags_are_accepted(self):
         for tag in [
             "v3.3.4",
-            "personal-v3.3.4-0",
-            "personal-v3.3.4-01",
-            "personal-v3.3.4-1\nsha=bad",
-            "personal-v3.3.4-rc1",
-            "../personal-v3.3.4-1",
+            "personal-v3.3.4-1",
+            "paperless-3.3.4.r3",
+            "paperless-3.3.4-0",
+            "paperless-3.3.4-01",
+            "paperless-3.3.4-1\nsha=bad",
+            "paperless-3.3.4-rc1",
+            "../paperless-3.3.4-1",
         ]:
             with self.subTest(tag=tag):
                 self.event["release"]["tag_name"] = tag
@@ -162,7 +164,7 @@ class PersonalReleaseTests(unittest.TestCase):
             self.verify()
 
     def test_tag_version_must_match_application_and_stable(self):
-        tag = "personal-v3.3.5-1"
+        tag = "paperless-3.3.5-1"
         self.git("tag", tag)
         self.event["release"]["tag_name"] = tag
         with self.assertRaisesRegex(policy.ReleaseError, "version must match"):

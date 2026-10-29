@@ -9,7 +9,7 @@ concurrency:
 jobs:
   verify:
     if: >-
-      github.repository == 'renzbagaporo/paperless-ngx' && startsWith(github.event.release.tag_name, 'personal-v') && !github.event.release.prerelease && !github.event.release.draft
+      github.repository == 'renzbagaporo/paperless-ngx' && startsWith(github.event.release.tag_name, 'paperless-') && !github.event.release.prerelease && !github.event.release.draft
     runs-on: ubuntu-latest
     permissions:
       contents: read

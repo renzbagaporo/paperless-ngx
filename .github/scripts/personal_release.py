@@ -32,7 +32,7 @@ WORKFLOWS = (
     "ci-docs.yml",
 )
 RELEASE_TAG = re.compile(
-    r"personal-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-[1-9]\d*",
+    r"paperless-((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-[1-9]\d*",
 )
 
 
@@ -117,7 +117,7 @@ def verify_release(
     tag = release.get("tag_name", "")
     match = RELEASE_TAG.fullmatch(tag)
     if match is None or len(tag) > 128:
-        raise ReleaseError("Use a release tag such as personal-v3.3.4-1")
+        raise ReleaseError("Use a release tag such as paperless-3.3.4-1")
     if not re.fullmatch(r"[0-9a-f]{40}", sha) or not re.fullmatch(
         r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
         repository,
