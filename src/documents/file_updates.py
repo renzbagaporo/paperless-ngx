@@ -13,6 +13,7 @@ import tempfile
 import uuid
 from contextlib import ExitStack
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import magic
@@ -60,37 +61,107 @@ def _paths(document: Document, *, thumbnail: bool = True) -> list[Path]:
     ]
 
 
-def _remove_obsolete(paths: list[Path], version_ids: list[int]) -> None:
+def _is_referenced(path: Path) -> bool:
+    if path.is_relative_to(settings.ORIGINALS_DIR):
+        return Document.global_objects.filter(
+            filename=str(path.relative_to(settings.ORIGINALS_DIR)),
+        ).exists()
+    if path.is_relative_to(settings.ARCHIVE_DIR):
+        return Document.global_objects.filter(
+            archive_filename=str(path.relative_to(settings.ARCHIVE_DIR)),
+        ).exists()
+    if path.is_relative_to(settings.THUMBNAIL_DIR):
+        return (
+            path.stem.isdigit()
+            and Document.global_objects.filter(pk=path.stem.lstrip("0") or "0").exists()
+        )
+    raise ValueError("Path is outside document storage")
+
+
+def available_destination(
+    document: Document,
+    directory: Path,
+    *,
+    archive_filename: bool = False,
+    candidate: Path | None = None,
+) -> Path:
+    """Reserve filesystem and committed SQL names while the caller holds MEDIA_LOCK."""
+    base = (
+        candidate
+        if candidate is not None
+        else directory
+        / generate_unique_filename(document, archive_filename=archive_filename)
+    )
+    validate_path_in_root(base, directory)
+    destination = base
+    counter = 0
+    while destination.exists() or _is_referenced(destination):
+        counter += 1
+        destination = base.with_stem(f"{base.stem}_{counter:02}")
+    return destination
+
+
+@dataclass
+class RollbackFile:
+    destination: Path
+    thumbnail: Path
+    previous_thumbnail: bytes | None
+    document_id: int
+    checksum: str | None = None
+
+
+def _remove_obsolete(
+    paths: list[Path],
+    version_ids: list[int],
+    *,
+    identities=None,
+    version_identities=None,
+    root_id=None,
+) -> None:
     """Cleanup follows commit; a failed unlink leaves unused bytes, never a broken root."""
     if version_ids:
-        # The deleted manager performs a hard delete, as empty_trash() does.
-        Document.deleted_objects.filter(pk__in=version_ids).delete()
+        # Bind a cleanup intent to the same deletion lifetime at the actual
+        # hard-delete boundary. Restore/retrash and imports can reuse IDs.
+        with transaction.atomic():
+            versions = Document.deleted_objects.select_for_update().filter(
+                pk__in=version_ids,
+            )
+            if version_identities is not None:
+                from documents.file_cleanup import version_identity
+
+                versions = versions.filter(root_document_id=root_id)
+                version_ids = [
+                    version.pk
+                    for version in versions
+                    if version_identities.get(str(version.pk))
+                    == version_identity(version)
+                ]
+            else:
+                version_ids = list(versions.values_list("pk", flat=True))
+            # The deleted manager performs a hard delete, as empty_trash() does.
+            Document.deleted_objects.filter(pk__in=version_ids).delete()
+        # Retired files are unlinked only after the hard-delete commit succeeds.
     failures = []
     with FileLock(settings.MEDIA_LOCK):
         for path in set(paths):
             # Another update may already have reused a name. Never unlink a path
             # currently referenced by any document, including documents in the trash.
-            if path.is_relative_to(settings.ORIGINALS_DIR):
-                referenced = Document.global_objects.filter(
-                    filename=str(path.relative_to(settings.ORIGINALS_DIR)),
-                ).exists()
-            elif path.is_relative_to(settings.ARCHIVE_DIR):
-                referenced = Document.global_objects.filter(
-                    archive_filename=str(path.relative_to(settings.ARCHIVE_DIR)),
-                ).exists()
-            elif path.is_relative_to(settings.THUMBNAIL_DIR):
-                referenced = (
-                    Document.global_objects.filter(
-                        pk=path.stem.lstrip("0") or "0",
-                    ).exists()
-                    if path.stem.isdigit()
-                    else False
-                )
-            else:
+            try:
+                referenced = _is_referenced(path)
+            except ValueError:
                 logger.error("Refusing cleanup outside document storage: %s", path)
                 continue
             if referenced:
                 continue
+            if identities is not None and path.exists():
+                from documents.file_cleanup import file_identity
+
+                if file_identity(path) != identities.get(path):
+                    logger.error(
+                        "Retired file identity changed; retaining it for review",
+                    )
+                    failures.append(path)
+                    continue
             try:
                 path.unlink(missing_ok=True)
             except OSError:
@@ -102,7 +173,17 @@ def _remove_obsolete(paths: list[Path], version_ids: list[int]) -> None:
         clear_document_caches(document_id)
 
 
-def _cleanup_after_commit(paths: list[Path], version_ids: list[int]) -> None:
+def _cleanup_after_commit(
+    paths: list[Path],
+    version_ids: list[int],
+    *,
+    job_id=None,
+) -> None:
+    if job_id is not None:
+        from documents.file_cleanup import complete_cleanup
+
+        complete_cleanup(job_id)
+        return
     try:
         _remove_obsolete(paths, version_ids)
     except Exception:
@@ -113,14 +194,29 @@ def _cleanup_after_commit(paths: list[Path], version_ids: list[int]) -> None:
         cleanup_obsolete_document_files.delay(filenames, version_ids)
 
 
-def _publish(root_id: int, version_ids: list[int]) -> None:
+def _publish(
+    root_id: int,
+    version_ids: list[int],
+    *,
+    workflow_events: bool = True,
+) -> None:
     clear_document_caches(root_id)
-    root = Document.objects.get(pk=root_id)
+    root = Document.objects.filter(pk=root_id).first()
     from documents.search import get_backend
 
-    document_updated.send_robust(sender=None, document=root)
-    root.refresh_from_db()
     backend = get_backend()
+    if root is None:
+        backend.remove(root_id)
+        return
+    from documents.deferred_ingestion import suppress_updated_event
+
+    if workflow_events and not suppress_updated_event(root):
+        document_updated.send_robust(sender=None, document=root, skip_ai_index=True)
+    else:
+        from documents.signals.handlers import send_websocket_document_updated
+
+        send_websocket_document_updated(sender=None, document=root)
+    root.refresh_from_db(from_queryset=Document.global_objects.all())
     for version_id in version_ids:
         backend.remove(version_id)
     backend.add_or_update(root)
@@ -129,19 +225,38 @@ def _publish(root_id: int, version_ids: list[int]) -> None:
 @contextmanager
 def _atomic_file_update():
     rollback = []
+    committed = False
+
+    def acknowledge_commit():
+        nonlocal committed
+        committed = True
+
     try:
         with transaction.atomic():
+            # Register before installation callbacks: a callback failure occurs
+            # after COMMIT and must never trigger filesystem rollback.
+            transaction.on_commit(acknowledge_commit)
             yield rollback
     except Exception:
+        if committed:
+            raise
         # Include errors raised by the database COMMIT itself, after _install
         # has returned. Original document bytes have not yet been removed.
         with FileLock(settings.MEDIA_LOCK):
-            for destination, thumbnail, previous_thumbnail in reversed(rollback):
-                destination.unlink(missing_ok=True)
-                if previous_thumbnail is None:
-                    thumbnail.unlink(missing_ok=True)
+            for entry in reversed(rollback):
+                try:
+                    if _is_referenced(entry.destination):
+                        continue  # A post-commit callback failed; data is committed.
+                except Exception:
+                    logger.exception(
+                        "Could not verify rollback file ownership; retaining bytes",
+                    )
+                    continue
+                entry.destination.unlink(missing_ok=True)
+                if entry.previous_thumbnail is None:
+                    entry.thumbnail.unlink(missing_ok=True)
                 else:
-                    thumbnail.write_bytes(previous_thumbnail)
+                    entry.thumbnail.write_bytes(entry.previous_thumbnail)
         raise
 
 
@@ -158,11 +273,19 @@ def _install(
     rollback: list,
     actor=None,
     pages: list[dict] | None = None,
+    manual_content: bool = False,
+    file_event: bool = True,
+    index_pending: bool = True,
+    discard_history: bool = True,
 ) -> Document:
     """Called with the root row and MEDIA_LOCK held, in an atomic transaction."""
     from auditlog.models import LogEntry
 
-    previous = list(Document.global_objects.filter(root_document=root))
+    previous = (
+        list(Document.global_objects.filter(root_document=root))
+        if discard_history
+        else []
+    )
     old_paths = _paths(root, thumbnail=False) if keep_only_current_file else []
     old_ids = [v.pk for v in previous] if keep_only_current_file else []
     for version in previous if keep_only_current_file else []:
@@ -193,14 +316,16 @@ def _install(
     # A fresh, unreferenced path means a database rollback leaves the previous
     # file intact. Do not let generate_unique_filename return the current path.
     target.filename = None
-    destination = settings.ORIGINALS_DIR / generate_unique_filename(target)
+    destination = available_destination(target, settings.ORIGINALS_DIR)
     validate_path_in_root(destination, settings.ORIGINALS_DIR)
     destination.parent.mkdir(parents=True, exist_ok=True)
     thumb_path = target.thumbnail_path
     thumb_path.parent.mkdir(parents=True, exist_ok=True)
     old_thumb = thumb_path.read_bytes() if thumb_path.exists() else None
-    rollback.append((destination, thumb_path, old_thumb))
+    entry = RollbackFile(destination, thumb_path, old_thumb, target.pk)
+    rollback.append(entry)
     shutil.copyfile(source, destination)
+    entry.checksum = compute_checksum(destination)
     with tempfile.NamedTemporaryFile(dir=thumb_path.parent, delete=False) as output:
         temporary_thumb = Path(output.name)
         output.write(thumbnail.read_bytes())
@@ -238,18 +363,40 @@ def _install(
             additional_data={
                 "reason": reason,
                 "keep_only_current_file": keep_only_current_file,
+                "discard_history": discard_history,
             },
         )
+    from documents.file_cleanup import record_cleanup
+
+    cleanup = record_cleanup(root.pk, old_paths, old_ids)
     transaction.on_commit(
-        lambda: _cleanup_after_commit(old_paths, old_ids),
+        lambda: _cleanup_after_commit(
+            old_paths,
+            old_ids,
+            job_id=cleanup.pk if cleanup else None,
+        ),
         robust=True,
     )
-    transaction.on_commit(lambda: _publish(root.pk, old_ids), robust=True)
     target.refresh_from_db()
     if pages is not None:
         from documents.page_data import save_pages
 
-        save_pages(target, pages)
+        # Each custom revision is the final merged PDF. Keeping file history
+        # retains prior revisions, not a raw/archive pair on this revision.
+        for page in pages:
+            page["provenance"]["store_only_current_file"] = True
+        save_pages(
+            target,
+            pages,
+            file_event=file_event,
+            automatic_content=text,
+            manual_content=manual_content,
+            index_pending=index_pending,
+        )
+    transaction.on_commit(
+        lambda: _publish(root.pk, old_ids, workflow_events=file_event),
+        robust=True,
+    )
     return target
 
 
@@ -463,6 +610,7 @@ def update_file(
                     thumbnail = Path(new_thumbnail) if new_thumbnail else None
                     retained_count = 0
                     pages = new_pages
+                    manual_content = False
                     if append or uploaded_file is None:
                         current = latest.archive_path or latest.source_path
                         current_mime = (
@@ -474,6 +622,23 @@ def update_file(
                         from documents.page_data import selected_pages
 
                         retained_pages = pages_for_file(latest, current)
+                        from documents.page_data import has_manual_content
+                        from documents.page_data import stored_pages
+
+                        retains_all_pages = operations is None or {
+                            op["page"] for op in operations
+                        } == set(range(1, len(retained_pages) + 1))
+                        manual_content = (
+                            retains_all_pages
+                            and (
+                                source_mode != "explicit_selection"
+                                or stored_pages(latest) is not None
+                            )
+                            and has_manual_content(
+                                latest,
+                                retained_pages,
+                            )
+                        )
                         if operations is not None:
                             edited = work / "edited.pdf"
                             _edit_pdf_pages(current, edited, operations)
@@ -492,11 +657,15 @@ def update_file(
                             ):
                                 existing.pages.extend(added.pages)
                                 existing.save(result)
-                        if operations is None:
+                        if operations is None or manual_content:
                             text = "\n\n".join(
                                 value for value in (latest.content, new_text) if value
                             )
-                            thumbnail = latest.thumbnail_path
+                            thumbnail = (
+                                latest.thumbnail_path
+                                if operations is None
+                                else make_thumbnail_from_pdf(result, work)
+                            )
                         else:
                             from documents.page_data import joined_text
 
@@ -523,6 +692,7 @@ def update_file(
                         rollback=rollback,
                         actor=user,
                         pages=pages,
+                        manual_content=manual_content,
                     )
                     if checks is not None:
                         from documents.ingestion_checks import apply_ingestion_checks
@@ -536,18 +706,40 @@ def update_file(
     return {"document_id": root_id}
 
 
-def compact_current_files(root_id: int) -> None:
-    """Keep the latest searchable file on the root and discard older file data."""
+def _compact_files(
+    root_id: int,
+    *,
+    discard_history: bool,
+    expected_revision: tuple[str, str | None] | None = None,
+) -> None:
+    """Compact a selected revision while holding its root and media locks."""
+    from documents.page_data import has_manual_content
+
     with (
         FileLock(settings.DATA_DIR / f"document-file-{root_id}.lock"),
         _atomic_file_update() as rollback,
     ):
-        root = Document.objects.select_for_update().get(
-            pk=root_id,
-            root_document__isnull=True,
+        root = (
+            Document.objects.select_for_update()
+            .filter(
+                pk=root_id,
+                root_document__isnull=True,
+            )
+            .first()
         )
+        if root is None:
+            return
         with FileLock(settings.MEDIA_LOCK):
-            current = get_latest_version_for_root(root)
+            current = get_latest_version_for_root(root) if discard_history else root
+            if (
+                expected_revision is not None
+                and (
+                    current.checksum,
+                    current.archive_checksum,
+                )
+                != expected_revision
+            ):
+                return
             source = current.archive_path or current.source_path
             mime_type = (
                 "application/pdf" if current.has_archive_version else current.mime_type
@@ -569,16 +761,45 @@ def compact_current_files(root_id: int) -> None:
                     ),
                 ),
                 keep_only_current_file=True,
-                reason="Stored current file only",
+                reason="Stored current file only"
+                if discard_history
+                else "Compacted ingested root file",
                 rollback=rollback,
                 pages=pages_for_file(current, source),
+                manual_content=has_manual_content(
+                    current,
+                    pages_for_file(current, source),
+                ),
+                file_event=False,
+                index_pending=False,
+                discard_history=discard_history,
             )
+
+
+def compact_current_files(root_id: int) -> None:
+    """Keep the latest searchable file on the root and discard older file data."""
+    _compact_files(root_id, discard_history=True)
+
+
+def compact_ingested_root(
+    root_id: int,
+    file_checksum: str,
+    archive_checksum: str | None,
+) -> None:
+    """Compact only the originally ingested root, preserving later file history."""
+    _compact_files(
+        root_id,
+        discard_history=False,
+        expected_revision=(file_checksum, archive_checksum),
+    )
 
 
 def compact_imported_document(document: Document) -> None:
     """Compaction is retryable maintenance after an import has safely succeeded."""
+    expected_checksum = document.checksum
+    expected_archive_checksum = document.archive_checksum
     try:
-        compact_current_files(document.pk)
+        compact_ingested_root(document.pk, expected_checksum, expected_archive_checksum)
     except Exception:
         logger.exception(
             "Imported document %s is saved; queuing file compaction retry",
@@ -587,7 +808,11 @@ def compact_imported_document(document: Document) -> None:
         from documents.tasks import compact_document_files
 
         try:
-            compact_document_files.delay(document.pk)
+            compact_document_files.delay(
+                document.pk,
+                expected_checksum,
+                expected_archive_checksum,
+            )
         except Exception:
             # A broker outage must not turn a persisted import into a failed
             # consume task whose input file has already been consumed.

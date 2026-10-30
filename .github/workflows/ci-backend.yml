@@ -132,17 +132,31 @@ jobs:
           PAPERLESS_CI_TEST: 1
           PYTHON_VERSION: ${{ steps.setup-python.outputs.python-version }}
         run: |
+          backend_status=0
           uv run \
             --python "${PYTHON_VERSION}" \
             --dev \
             --frozen \
-            pytest
+            pytest \
+            --ignore=src/documents/tests/test_management_importer.py \
+            --ignore=src/documents/tests/test_management_exporter.py || backend_status=$?
+          # Import/export commands disable process-global audit receivers.
+          uv run \
+            --python "${PYTHON_VERSION}" \
+            --dev \
+            --frozen \
+            pytest \
+            --cov-append \
+            --junitxml=junit-import-export.xml \
+            src/documents/tests/test_management_importer.py \
+            src/documents/tests/test_management_exporter.py || backend_status=$?
+          exit "$backend_status"
       - name: Upload test results to Codecov
         if: always()
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           flags: backend-python-${{ matrix.python-version }}
-          files: junit.xml
+          files: junit.xml,junit-import-export.xml
           report_type: test_results
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

@@ -121,6 +121,17 @@ describe('SystemStatusDialogComponent', () => {
     expect(closeSpy).toHaveBeenCalled()
   })
 
+  it('should display the personal revision without a frontend version mismatch', () => {
+    component.status.update((status) => ({
+      ...status,
+      pngx_display_version: '2.4.3-7 (personal)',
+    }))
+    component.ngOnInit()
+    fixture.detectChanges()
+    expect(fixture.nativeElement.textContent).toContain('2.4.3-7 (personal)')
+    expect(component.versionMismatch()).toBeFalsy()
+  })
+
   it('should copy the system status to clipboard', () => {
     jest.useFakeTimers()
     jest.spyOn(clipboard, 'copy')

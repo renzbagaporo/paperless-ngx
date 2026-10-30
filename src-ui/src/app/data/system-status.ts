@@ -12,6 +12,7 @@ export enum SystemStatusItemStatus {
 
 export interface SystemStatus {
   pngx_version: string
+  pngx_display_version?: string
   server_os: string
   install_type: InstallType
   storage: {

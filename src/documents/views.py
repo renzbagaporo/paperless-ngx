@@ -2395,6 +2395,8 @@ class DocumentViewSet(
             )
         except (ValueError, Document.DoesNotExist):
             return Response({"detail": "Invalid document version."}, status=400)
+        from documents.page_data import public_provenance
+
         pages = stored_pages(source)
         return Response(
             {
@@ -2403,7 +2405,12 @@ class DocumentViewSet(
                 "file_checksum": checksum(source),
                 "available": pages is not None,
                 "pages": [
-                    {"page": index, **page, "origin": str(page["origin"])}
+                    {
+                        "page": index,
+                        **page,
+                        "origin": str(page["origin"]),
+                        "provenance": public_provenance(page["provenance"]),
+                    }
                     for index, page in enumerate(pages or [], 1)
                 ],
             },
@@ -4507,7 +4514,7 @@ class UiSettingsView(GenericAPIView[Any]):
 
         general_config = GeneralConfig()
 
-        ui_settings["version"] = version.__full_version_str__
+        ui_settings["version"] = version.get_display_version()
 
         ui_settings["app_title"] = settings.APP_TITLE
         if general_config.app_title is not None and len(general_config.app_title) > 0:
@@ -5500,6 +5507,7 @@ class CustomFieldViewSet(PermissionsAwareDocumentCountMixin, ModelViewSet[Custom
                 name="SystemStatus",
                 fields={
                     "pngx_version": serializers.CharField(),
+                    "pngx_display_version": serializers.CharField(),
                     "server_os": serializers.CharField(),
                     "install_type": serializers.CharField(),
                     "storage": inline_serializer(
@@ -5788,6 +5796,7 @@ class SystemStatusView(PassUserMixin):
         return Response(
             {
                 "pngx_version": current_version,
+                "pngx_display_version": version.get_display_version(),
                 "server_os": platform.platform(),
                 "install_type": install_type,
                 "storage": {

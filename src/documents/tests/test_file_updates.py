@@ -624,14 +624,14 @@ def test_compaction_failure_keeps_successful_import_and_queues_retry():
     root = DocumentFactory()
     with (
         mock.patch(
-            "documents.file_updates.compact_current_files",
+            "documents.file_updates.compact_ingested_root",
             side_effect=OSError("disk full"),
         ),
         mock.patch("documents.tasks.compact_document_files.delay") as retry,
     ):
         compact_imported_document(root)
     assert Document.objects.filter(pk=root.pk).exists()
-    retry.assert_called_once_with(root.pk)
+    retry.assert_called_once_with(root.pk, root.checksum, root.archive_checksum)
 
 
 @pytest.mark.django_db

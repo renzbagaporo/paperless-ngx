@@ -340,7 +340,7 @@ class TestUpdateContent(DirectoriesMixin, TestCase):
         )
 
     @override_settings(AI_ENABLED=True, LLM_EMBEDDING_BACKEND="huggingface")
-    @mock.patch("documents.tasks.llm_index_add_or_update_document")
+    @mock.patch("documents.tasks.update_document_in_llm_index.apply_async")
     @mock.patch("documents.search.get_backend")
     def test_update_content_version_updates_llm_index(
         self,
@@ -358,7 +358,8 @@ class TestUpdateContent(DirectoriesMixin, TestCase):
         """
         _, version = self._create_root_with_version()
 
-        tasks.update_document_content_maybe_archive_file(version.pk)
+        with self.captureOnCommitCallbacks(execute=True):
+            tasks.update_document_content_maybe_archive_file(version.pk)
 
         mock_llm_index.assert_called_once()
 
@@ -522,6 +523,7 @@ class TestAIIndex(DirectoriesMixin, TestCase):
             update_llm_index.assert_called_once_with(
                 rebuild=False,
                 document_ids=doc_ids,
+                require_completed=True,
             )
 
 

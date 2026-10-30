@@ -4,6 +4,7 @@ import shutil
 import uuid
 import zipfile
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from tempfile import mkstemp
@@ -40,8 +41,6 @@ from documents.data_models import ConsumeFileSuccessResult
 from documents.data_models import DocumentMetadataOverrides
 from documents.data_models import StoredBarcode
 from documents.double_sided import CollatePlugin
-from documents.file_handling import create_source_path_directory
-from documents.file_handling import generate_unique_filename
 from documents.matching import prefilter_documents_by_workflowtrigger
 from documents.models import Correspondent
 from documents.models import CustomFieldInstance
@@ -69,6 +68,7 @@ from documents.utils import IterWrapper
 from documents.utils import compute_checksum
 from documents.utils import identity
 from documents.versioning import annotate_effective_content
+from documents.versioning import get_latest_version_for_root
 from documents.workflows.utils import get_workflows_for_trigger
 from paperless.config import AIConfig
 from paperless.config import BarcodeConfig
@@ -355,10 +355,20 @@ def update_document_file(
 
 
 @shared_task(autoretry_for=(OSError, DatabaseError), retry_backoff=30, max_retries=5)
-def compact_document_files(document_id: int) -> None:
-    from documents.file_updates import compact_current_files
+def compact_document_files(
+    document_id: int,
+    file_checksum: str | None = None,
+    archive_checksum: str | None = None,
+) -> None:
+    from documents.file_updates import compact_ingested_root
 
-    compact_current_files(document_id)
+    if file_checksum is None:
+        logger.info(
+            "Skipping file compaction for document %s without a source revision identity",
+            document_id,
+        )
+        return
+    compact_ingested_root(document_id, file_checksum, archive_checksum)
 
 
 @shared_task(autoretry_for=(OSError, DatabaseError), retry_backoff=30, max_retries=5)
@@ -398,7 +408,7 @@ def sanity_check(*, raise_on_error: bool = True) -> str:
 
 
 @shared_task
-def bulk_update_documents(document_ids) -> None:
+def bulk_update_documents(document_ids, *, ocr_retry_only_ids=None) -> None:
     from documents.search import get_backend
 
     document_ids = list(document_ids)
@@ -410,25 +420,70 @@ def bulk_update_documents(document_ids) -> None:
         Document.objects.filter(id__in=document_ids),
     )
 
+    retry_only_ids = set(ocr_retry_only_ids or [])
+    index_ids = []
     for doc in documents:
         clear_document_caches(doc.pk)
-        document_updated.send(
-            sender=None,
-            document=doc,
-            logging_group=uuid.uuid4(),
-            skip_ai_index=True,  # bulk path calls update_llm_index once below
-        )
+        from documents.ocr_queue import pending_pages
+
+        current = get_latest_version_for_root(doc)
+        pending = bool(pending_pages(current))
+        if doc.pk in retry_only_ids:
+            send_websocket_document_updated(sender=None, document=doc)
+        else:
+            document_updated.send(
+                sender=None,
+                document=doc,
+                logging_group=uuid.uuid4(),
+                skip_ai_index=True,
+            )
+            if not pending:
+                index_ids.append(doc.pk)
         post_save.send(Document, instance=doc, created=False)
 
     with get_backend().batch_update() as batch:
         batch.add_or_update_ids(document_ids)
 
     ai_config = AIConfig()
-    if ai_config.llm_index_enabled:
-        update_llm_index(
-            rebuild=False,
-            document_ids=document_ids,
-        )
+    if ai_config.llm_index_enabled and index_ids:
+        positions = {str(pk): index for index, pk in enumerate(document_ids)}
+        index_ids.sort(key=lambda pk: positions.get(str(pk), len(positions)))
+        from documents.ocr_index import acknowledge_manual_index
+        from documents.ocr_index import mark_pending
+
+        while True:
+            root_ids = sorted(
+                {
+                    doc.root_document_id or doc.pk
+                    for doc in Document.objects.filter(pk__in=index_ids).only(
+                        "pk",
+                        "root_document_id",
+                    )
+                },
+            )
+            with ExitStack() as locks:
+                for root_id in root_ids:
+                    locks.enter_context(
+                        FileLock(
+                            settings.DATA_DIR / f"document-index-work-{root_id}.lock",
+                        ),
+                    )
+                documents = list(Document.objects.filter(pk__in=index_ids))
+                if any(
+                    (doc.root_document_id or doc.pk) not in root_ids
+                    for doc in documents
+                ):
+                    continue
+                snapshots = [(doc, mark_pending(doc)) for doc in documents]
+                update_llm_index(
+                    rebuild=False,
+                    document_ids=index_ids,
+                    require_completed=True,
+                )
+                for doc, expected in snapshots:
+                    if expected is not None:
+                        acknowledge_manual_index(doc, expected)
+                break
 
 
 def _read_barcodes_for_reprocess(document: Document) -> list[StoredBarcode] | None:
@@ -459,11 +514,57 @@ def update_document_content_maybe_archive_file(
     document_id,
     *,
     remote_ocr: bool = False,
+    pending_only: bool = False,
 ) -> None:
-    document = Document.objects.get(pk=document_id)
+    if pending_only:
+        document = Document.objects.filter(pk=document_id).first()
+        if document is None:
+            return
+    else:
+        document = Document.objects.get(pk=document_id)
     root_id = document.root_document_id or document.pk
+    from documents.ocr_queue import pending_pages
+    from documents.ocr_queue import retry_pending_ocr
+
+    current = (
+        get_latest_version_for_root(document)
+        if document.root_document_id is None
+        else document
+    )
+    config = RemoteOCRConfig()
+
+    def use_saved_ocr(candidate):
+        return bool(pending_pages(candidate)) and (
+            pending_only
+            or (
+                config.remote_ocr_engine == "llamaparse"
+                and (remote_ocr or config.remote_ocr_by_default)
+            )
+        )
+
+    if use_saved_ocr(current):
+        # Preserve a root request until retry owns the file lock and can
+        # select the then-current revision. Explicit child requests stay scoped.
+        retry_pending_ocr(document.pk, requested_only=pending_only)
+        return
+    if pending_only:
+        return
     with FileLock(settings.DATA_DIR / f"document-file-{root_id}.lock"):
-        _update_document_content_maybe_archive_file(document_id, remote_ocr=remote_ocr)
+        document.refresh_from_db()
+        current = (
+            get_latest_version_for_root(document)
+            if document.root_document_id is None
+            else document
+        )
+        if not use_saved_ocr(current):
+            _update_document_content_maybe_archive_file(
+                current.pk,
+                remote_ocr=remote_ocr,
+            )
+            return
+    # A file update completed while this task waited. The retry function owns
+    # its lock and performs its own final revision selection.
+    retry_pending_ocr(document.pk, requested_only=pending_only)
 
 
 def _update_document_content_maybe_archive_file(
@@ -498,66 +599,165 @@ def _update_document_content_maybe_archive_file(
 
     with parser_class() as parser:
         parser.configure(ParserContext())
+        from paperless.parsers.llamaparse import LlamaParseDocumentParser
 
         try:
+            with FileLock(settings.MEDIA_LOCK):
+                document.refresh_from_db()
+                before_content = document.content
+                expected_source_checksum = compute_checksum(
+                    document.archive_path or document.source_path,
+                )
+                policy_source = document.source_path
+                parse_source = document.source_path
+                parse_mime_type = mime_type
+                if isinstance(parser, LlamaParseDocumentParser):
+                    original = (
+                        parser._tempdir / f"original_input{document.source_path.suffix}"
+                    )
+                    shutil.copyfile(document.source_path, original)
+                    policy_source = original
+                    parse_source = original
+                    if document.archive_path is not None:
+                        parse_source = parser._tempdir / "stored_input.pdf"
+                        shutil.copyfile(document.archive_path, parse_source)
+                        parse_mime_type = "application/pdf"
             produce_archive = should_produce_archive(
                 parser,
                 mime_type,
-                document.source_path,
+                policy_source,
             )
+            from documents.page_data import stored_pages
+
+            previous_pages = stored_pages(document) or []
+
+            def bind_previous_evidence(evidence, previous):
+                from documents.page_data import preserve_page_state
+
+                if len(evidence) != len(previous):
+                    return
+                for page, old in zip(evidence, previous, strict=True):
+                    relative_basis = page["provenance"].get("layout_rotation", 0)
+                    for field in ("origin", "source_page", "rotation"):
+                        page[field] = old[field]
+                    preserve_page_state(old["provenance"], page["provenance"])
+                    page["provenance"]["layout_rotation"] = (
+                        old["rotation"] + relative_basis
+                    ) % 360
+                    page["provenance"].pop("ocr_job", None)
+                    retry = page["provenance"].get("ocr_retry")
+                    if retry:
+                        retry.update(requested=False, running=False)
+
+            parser_options = {}
+            if isinstance(parser, LlamaParseDocumentParser):
+                # Reprocess the same physical rendition that pending retries,
+                # page edits and splits retain. The remote parser removes its
+                # old invisible OCR before submitting compressed page content.
+                parser_options["auto_rotate"] = not any(
+                    page["rotation"] or page["provenance"].get("manual_rotation")
+                    for page in previous_pages
+                )
+
+                def remember_reprocess_job(job):
+                    from documents.ocr_queue import defer_existing_ocr
+                    from documents.ocr_recovery import RETRY
+                    from documents.ocr_recovery import store_requests
+
+                    status = {"status": "pending", "reason": "in_progress"}
+                    if job is not None:
+                        status["job"] = job
+                    defer_existing_ocr(document, status, parser.get_source_rendition())
+                    pages = stored_pages(document)
+                    for page in pages:
+                        page["provenance"][RETRY] = {
+                            "requested": False,
+                            "running": job is not None,
+                            "attempts": 1,
+                            "resume": True,
+                            "sent_at": None,
+                        }
+                    store_requests(document, pages)
+
+                parser._job_state_callback = remember_reprocess_job
             parser.parse(
-                document.source_path,
-                mime_type,
+                parse_source,
+                parse_mime_type,
                 produce_archive=produce_archive,
+                **parser_options,
             )
+
+            status = getattr(type(parser), "get_ocr_status", None)
+            if status and status(parser).get("status") == "pending":
+                from documents.ocr_queue import defer_existing_ocr
+
+                pending_rendition = parser.get_archive_path()
+                if isinstance(parser, LlamaParseDocumentParser):
+                    pending_rendition = (
+                        parser.get_source_rendition() or pending_rendition
+                    )
+                defer_existing_ocr(document, status(parser), pending_rendition)
+                if isinstance(parser, LlamaParseDocumentParser):
+                    from documents.ocr_recovery import finish
+
+                    finish(document)
+                return
 
             barcodes = _read_barcodes_for_reprocess(document)
 
-            thumbnail = parser.get_thumbnail(document.source_path, mime_type)
+            thumbnail = parser.get_thumbnail(
+                (parser.get_source_rendition() or parse_source)
+                if isinstance(parser, LlamaParseDocumentParser)
+                else document.source_path,
+                "application/pdf"
+                if isinstance(parser, LlamaParseDocumentParser)
+                else mime_type,
+            )
 
-            with transaction.atomic():
-                oldDocument = Document.objects.get(pk=document.pk)
-                if parser.get_archive_path():
-                    checksum = compute_checksum(parser.get_archive_path())
-                    # I'm going to save first so that in case the file move
-                    # fails, the database is rolled back.
-                    # We also don't use save() since that triggers the filehandling
-                    # logic, and we don't want that yet (file not yet in place)
-                    document.archive_filename = generate_unique_filename(
-                        document,
-                        archive_filename=True,
-                    )
-                    Document.objects.filter(pk=document.pk).update(
-                        archive_checksum=checksum,
-                        content=parser.get_text(),
-                        archive_filename=document.archive_filename,
-                    )
-                    newDocument = Document.objects.get(pk=document.pk)
+            page_index_coordinated = False
+            if parser.get_archive_path():
+                from documents.ingestion_checks import collect_ingestion_checks
+                from documents.ocr_queue import _install_page
+                from documents.page_data import parser_pages
+
+                evidence = parser_pages(parser, parser.get_archive_path())
+                bind_previous_evidence(evidence, previous_pages)
+                _install_page(
+                    document,
+                    parser.get_archive_path(),
+                    evidence,
+                    thumbnail,
+                    collect_ingestion_checks(parser, parser.get_text()),
+                    reprocess_content=parser.get_text(),
+                    expected_content=before_content,
+                    expected_source_checksum=expected_source_checksum,
+                )
+                page_index_coordinated = True
+                with transaction.atomic():
+                    if barcodes is not None:
+                        document.barcodes.all().delete()
+                        DocumentBarcode.objects.bulk_create(
+                            DocumentBarcode(document=document, **barcode)
+                            for barcode in barcodes
+                        )
                     if settings.AUDIT_LOG_ENABLED:
                         LogEntry.objects.log_create(
-                            instance=oldDocument,
-                            changes={
-                                "content": [oldDocument.content, newDocument.content],
-                                "archive_checksum": [
-                                    oldDocument.archive_checksum,
-                                    newDocument.archive_checksum,
-                                ],
-                                "archive_filename": [
-                                    oldDocument.archive_filename,
-                                    newDocument.archive_filename,
-                                ],
-                            },
-                            additional_data={
-                                "reason": "Update document content",
-                            },
+                            instance=document,
+                            changes={"content": [before_content, document.content]},
+                            additional_data={"reason": "Update document content"},
                             action=LogEntry.Action.UPDATE,
                         )
-                else:
-                    Document.objects.filter(pk=document.pk).update(
+            else:
+                with transaction.atomic():
+                    oldDocument = Document.objects.get(pk=document.pk)
+                    content_update = Document.objects.filter(pk=document.pk)
+                    if isinstance(parser, LlamaParseDocumentParser):
+                        content_update = content_update.filter(content=before_content)
+                    content_written = content_update.update(
                         content=parser.get_text(),
                     )
 
-                    if settings.AUDIT_LOG_ENABLED:
+                    if settings.AUDIT_LOG_ENABLED and content_written:
                         LogEntry.objects.log_create(
                             instance=oldDocument,
                             changes={
@@ -569,38 +769,75 @@ def _update_document_content_maybe_archive_file(
                             action=LogEntry.Action.UPDATE,
                         )
 
-                if barcodes is not None:
-                    document.barcodes.all().delete()
-                    DocumentBarcode.objects.bulk_create(
-                        DocumentBarcode(document=document, **barcode)
-                        for barcode in barcodes
-                    )
-                    # metadata_etag includes modified
-                    Document.objects.filter(pk=document.pk).update(
-                        modified=timezone.now(),
-                    )
-
-                with FileLock(settings.MEDIA_LOCK):
-                    if parser.get_archive_path():
-                        create_source_path_directory(document.archive_path)
-                        shutil.move(parser.get_archive_path(), document.archive_path)
-                    shutil.move(thumbnail, document.thumbnail_path)
-
-                    if (
-                        document.mime_type == "application/pdf"
-                        or document.has_archive_version
-                    ):
-                        from documents.page_data import parser_pages
-                        from documents.page_data import save_pages
-
-                        document.refresh_from_db()
-                        save_pages(
-                            document,
-                            parser_pages(
-                                parser,
-                                document.archive_path or document.source_path,
-                            ),
+                    if barcodes is not None:
+                        document.barcodes.all().delete()
+                        DocumentBarcode.objects.bulk_create(
+                            DocumentBarcode(document=document, **barcode)
+                            for barcode in barcodes
                         )
+                        # metadata_etag includes modified
+                        Document.objects.filter(pk=document.pk).update(
+                            modified=timezone.now(),
+                        )
+
+                    with FileLock(settings.MEDIA_LOCK):
+                        if isinstance(parser, LlamaParseDocumentParser):
+                            document.refresh_from_db()
+                            if (
+                                compute_checksum(
+                                    document.archive_path or document.source_path,
+                                )
+                                != expected_source_checksum
+                            ):
+                                raise ValueError(
+                                    "Stored file changed during OCR; result not installed.",
+                                )
+                        shutil.move(thumbnail, document.thumbnail_path)
+
+                        if (
+                            document.mime_type == "application/pdf"
+                            or document.has_archive_version
+                            or isinstance(parser, LlamaParseDocumentParser)
+                        ):
+                            from documents.page_data import parser_pages
+                            from documents.page_data import save_pages
+                            from documents.page_data import stored_pages
+
+                            document.refresh_from_db()
+                            previous_pages = stored_pages(document)
+                            reuse_existing = (
+                                status(parser).get("status") == "skip"
+                                if isinstance(parser, LlamaParseDocumentParser)
+                                else parser.get_archive_path() is None
+                            )
+                            reuse_existing = bool(
+                                reuse_existing
+                                and previous_pages
+                                and not any(
+                                    page["provenance"].get("ocr_status") == "pending"
+                                    for page in previous_pages
+                                ),
+                            )
+                            evidence = (
+                                previous_pages
+                                if reuse_existing
+                                else parser_pages(
+                                    parser,
+                                    parser.get_source_rendition() or parse_source
+                                    if isinstance(parser, LlamaParseDocumentParser)
+                                    else document.archive_path or document.source_path,
+                                )
+                            )
+                            if not reuse_existing:
+                                bind_previous_evidence(evidence, previous_pages or [])
+                            save_pages(
+                                document,
+                                evidence,
+                                automatic_content=parser.get_text() or "",
+                                manual_content=not bool(content_written),
+                                index_pending=True,
+                            )
+                            page_index_coordinated = True
 
             document.refresh_from_db()
             logger.info(
@@ -611,7 +848,7 @@ def _update_document_content_maybe_archive_file(
             get_backend().add_or_update(document)
 
             ai_config = AIConfig()
-            if ai_config.llm_index_enabled:
+            if ai_config.llm_index_enabled and not page_index_coordinated:
                 llm_index_add_or_update_document(document)
 
             clear_document_caches(document.pk)
@@ -622,6 +859,13 @@ def _update_document_content_maybe_archive_file(
             logger.exception(
                 f"Error while parsing document {document} (ID: {document_id})",
             )
+
+
+@shared_task
+def reconcile_queued_ocr() -> int:
+    from documents.ocr_recovery import reconcile
+
+    return reconcile()
 
 
 @shared_task
@@ -880,7 +1124,13 @@ def llmindex_index(
     retry_backoff_max=600,
     retry_jitter=True,
 )
-def apply_ai_suggestions(self, action_id: int, document_id: int) -> None:
+def apply_ai_suggestions(
+    self,
+    action_id: int,
+    document_id: int,
+    *,
+    expected_metadata: dict | None = None,
+) -> None:
     """
     Deferred "apply AI suggestions" workflow action.
     """
@@ -899,7 +1149,12 @@ def apply_ai_suggestions(self, action_id: int, document_id: int) -> None:
         )
         return
 
-    if not apply_ai_suggestions_to_document(action, document):
+    options = (
+        {"expected_metadata": expected_metadata}
+        if expected_metadata is not None
+        else {}
+    )
+    if not apply_ai_suggestions_to_document(action, document, **options):
         return
 
     # No document_updated signal to avoid loop
@@ -911,9 +1166,41 @@ def apply_ai_suggestions(self, action_id: int, document_id: int) -> None:
         update_document_in_llm_index.apply_async(kwargs={"document": document})
 
 
-@shared_task
-def update_document_in_llm_index(document) -> None:
-    llm_index_add_or_update_document(document)
+@shared_task(bind=True, acks_late=True, reject_on_worker_lost=True, max_retries=5)
+def update_document_in_llm_index(self, document, *, personal_index_token=None) -> None:
+    from documents.ocr_index import acknowledge_manual_index
+    from documents.ocr_index import mark_pending
+    from documents.ocr_index import run_queued_index
+
+    if personal_index_token is not None:
+        run_queued_index(
+            document,
+            personal_index_token,
+            llm_index_add_or_update_document,
+        )
+    else:
+        while True:
+            root_id = document.root_document_id or document.pk
+            with FileLock(settings.DATA_DIR / f"document-index-work-{root_id}.lock"):
+                document = Document.objects.filter(pk=document.pk).first()
+                if document is None:
+                    return
+                if (document.root_document_id or document.pk) != root_id:
+                    continue
+                expected = mark_pending(document)
+                try:
+                    if llm_index_add_or_update_document(document) is False:
+                        raise RuntimeError("LLM index write was deferred")
+                except Exception as error:
+                    if expected is None and self.request.retries < 5:
+                        raise self.retry(
+                            exc=error,
+                            countdown=min(60 * 2**self.request.retries, 900),
+                        )
+                    raise
+                if expected is not None:
+                    acknowledge_manual_index(document, expected)
+                return
 
 
 @shared_task

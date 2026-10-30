@@ -166,6 +166,13 @@ def parse_beat_schedule() -> dict:
                 "expires": 23.0 * 60.0 * 60.0,
             },
         },
+        {
+            "name": "Reconcile saved OCR work",
+            "env_key": "PAPERLESS_OCR_RECOVERY_TASK_CRON",
+            "env_default": "* * * * *",
+            "task": "documents.tasks.reconcile_queued_ocr",
+            "options": {"expires": 55.0},
+        },
     ]
     for task in tasks:
         # Either get the environment setting or use the default

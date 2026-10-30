@@ -103,6 +103,7 @@ def apply_ingestion_checks(
 ) -> None:
     """Attach private document notes; collection metadata is always preserved."""
     from documents.models import Note
+    from documents.ocr_status import status_tag
 
     try:
         notes = []
@@ -118,5 +119,14 @@ def apply_ingestion_checks(
         with transaction.atomic():
             for note in notes:
                 Note.objects.get_or_create(document=document, note=note)
+            if checks.suspicious_pages:
+
+                def mark_for_review():
+                    tag = status_tag("ocr-review")
+                    current = type(document).objects.filter(pk=document.pk).first()
+                    if current is not None:
+                        current.tags.add(tag)
+
+                transaction.on_commit(mark_for_review, robust=True)
     except Exception:
         logger.warning("Optional ingestion review notes could not be saved")

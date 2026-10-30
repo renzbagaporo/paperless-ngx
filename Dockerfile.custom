@@ -11,7 +11,9 @@ RUN node node_modules/@angular/cli/bin/ng.js build --configuration production
 FROM ghcr.io/paperless-ngx/paperless-ngx:3.3.4@sha256:9bc6e8248891bcfa6f52fffe8b81e4ea8cae75790c3ec1b9906961a7ba55c969
 LABEL org.opencontainers.image.source="https://github.com/renzbagaporo/paperless-ngx"
 WORKDIR /usr/src/paperless/src
+ARG PERSONAL_RELEASE=development
 COPY --chown=1000:1000 src/ ./
+RUN PERSONAL_RELEASE="${PERSONAL_RELEASE}" python3 -c 'import os; from pathlib import Path; from paperless.version import get_display_version; release = os.environ["PERSONAL_RELEASE"]; get_display_version(release); Path("paperless/personal-release.txt").write_text(release + "\n", encoding="utf-8")'
 COPY --chown=1000:1000 pyproject.toml uv.lock ./
 COPY --from=compile-frontend --chown=1000:1000 /src/src/documents/static/frontend/ ./documents/static/frontend/
 RUN PAPERLESS_SECRET_KEY=build-time-dummy python3 manage.py collectstatic --clear --no-input --link

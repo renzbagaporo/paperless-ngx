@@ -1,5 +1,12 @@
+import copy
 import logging
 
+from django.conf import settings
+from django.db import IntegrityError
+from django.db import transaction
+from django.db.models import Q
+from django.db.models.signals import post_delete
+from django.db.models.signals import post_save
 from django.utils import timezone
 from guardian.shortcuts import remove_perm
 
@@ -11,6 +18,151 @@ from documents.permissions import set_permissions_for_object
 from documents.templating.workflows import parse_w_workflow_placeholders
 
 logger = logging.getLogger("paperless.workflows.mutations")
+
+
+def _guarded_custom_field_query(document, field_id):
+    guard = document._deferred_metadata_guard
+    root_ids = Document.objects.filter(pk=document.pk, **guard["fields"]).values("pk")
+    # Keep value predicates on the target table. A root join would move them
+    # inside a PK subquery, weakening rechecks after a concurrent row update.
+    previous = guard["relations"]["custom_fields"][field_id]
+    query = CustomFieldInstance.objects.filter(
+        pk=guard["custom_field_ids"].get(field_id),
+        field_id=field_id,
+        document_id=document.pk,
+        document_id__in=root_ids,
+        **{
+            key: value for key, value in previous.items() if key != "value_document_ids"
+        },
+    )
+    if previous["value_document_ids"] is None:
+        # Django's JSONField exact=None means JSON null, not SQL NULL. Both
+        # represent an unset document-link value in the model snapshot.
+        return query.filter(
+            Q(value_document_ids__isnull=True) | Q(value_document_ids=None),
+        )
+    return query.filter(value_document_ids=previous["value_document_ids"])
+
+
+def _custom_field_audit(instance, *, changes):
+    if settings.AUDIT_LOG_ENABLED:
+        from auditlog.models import LogEntry
+
+        LogEntry.objects.log_create(
+            instance=instance,
+            action=LogEntry.Action.UPDATE,
+            changes=changes,
+            additional_data={"reason": "Apply deferred workflow custom field mutation"},
+        )
+
+
+def _assign_deferred_custom_field(document, field, value):
+    from documents.deferred_ingestion import MetadataChanged
+    from documents.deferred_ingestion import advance_metadata_guard
+
+    guard = document._deferred_metadata_guard
+    previous = guard["relations"]["custom_fields"].get(field.pk)
+    if previous is not None and value in (None, ""):
+        return
+    value_field = CustomFieldInstance.get_value_field_name(data_type=field.data_type)
+    value = CustomFieldInstance._meta.get_field(value_field).to_python(value)
+    if previous is not None and previous[value_field] == value:
+        return
+    expected = copy.deepcopy(guard["relations"])
+    if previous is None:
+        expected["custom_fields"][field.pk] = dict.fromkeys(
+            set(CustomFieldInstance.TYPE_TO_DATA_STORE_NAME_MAP.values()),
+        )
+    expected["custom_fields"][field.pk][value_field] = value
+    if previous is None:
+        instance = CustomFieldInstance(
+            document_id=document.pk,
+            field=field,
+            **{value_field: value},
+        )
+        try:
+            with transaction.atomic():
+                if not Document.objects.filter(
+                    pk=document.pk,
+                    **guard["fields"],
+                ).exists():
+                    raise MetadataChanged("Deferred custom field metadata changed")
+                CustomFieldInstance.objects.bulk_create([instance])
+                if not Document.objects.filter(
+                    pk=document.pk,
+                    **guard["fields"],
+                ).exists():
+                    raise MetadataChanged("Deferred custom field metadata changed")
+        except IntegrityError as error:
+            raise MetadataChanged("A concurrent custom field was preserved") from error
+        instance.refresh_from_db()
+    else:
+        instance = CustomFieldInstance.objects.filter(
+            pk=guard["custom_field_ids"].get(field.pk),
+        ).first()
+        if instance is None or not _guarded_custom_field_query(
+            document,
+            field.pk,
+        ).update(**{value_field: value}):
+            raise MetadataChanged("A concurrent custom field edit was preserved")
+        instance.refresh_from_db()
+        _custom_field_audit(
+            instance,
+            changes={value_field: [str(previous[value_field]), str(value)]},
+        )
+    # QuerySet writes avoid unconditional save(). Publish the usual post-save
+    # effects after SQL, with a separately loaded document so filename handlers
+    # cannot discard the parent workflow's staged direct-field assignments.
+    post_save.send(
+        sender=CustomFieldInstance,
+        instance=instance,
+        created=previous is None,
+        raw=False,
+        using=instance._state.db,
+        update_fields=None if previous is None else frozenset((value_field,)),
+    )
+    advance_metadata_guard(document, expected_relations=expected)
+
+
+def _remove_deferred_custom_fields(document, field_ids):
+    from documents.deferred_ingestion import MetadataChanged
+    from documents.deferred_ingestion import advance_metadata_guard
+    from documents.signals.handlers import update_filename_and_move_files
+
+    for field_id in field_ids:
+        guard = document._deferred_metadata_guard
+        instance = CustomFieldInstance.objects.filter(
+            pk=guard["custom_field_ids"].get(field_id),
+        ).first()
+        query = _guarded_custom_field_query(document, field_id)
+        if instance is None or not query._raw_delete(using=query.db):
+            raise MetadataChanged("A concurrent custom field edit was preserved")
+        post_delete.send(
+            sender=CustomFieldInstance,
+            instance=instance,
+            using=query.db,
+            origin=query,
+        )
+        update_filename_and_move_files(
+            sender=Document,
+            instance=Document.objects.get(pk=document.pk),
+        )
+        expected = copy.deepcopy(guard["relations"])
+        expected["custom_fields"].pop(field_id)
+        advance_metadata_guard(document, expected_relations=expected)
+
+
+def _prepare_deferred_custom_fields(document, action):
+    from documents.deferred_ingestion import advance_metadata_guard
+    from documents.deferred_ingestion import expected_action_relations
+
+    expected = expected_action_relations(document, action)
+    expected["custom_fields"] = copy.deepcopy(
+        document._deferred_metadata_guard["relations"]["custom_fields"],
+    )
+    # Tags and grants earlier in this same action have known allowed effects;
+    # custom fields must still match their prior values before their SQL writes.
+    advance_metadata_guard(document, expected_relations=expected)
 
 
 def apply_assignment_to_document(
@@ -90,6 +242,15 @@ def apply_assignment_to_document(
         )
 
     if action.has_assign_custom_fields:
+        if getattr(document, "_deferred_metadata_guard", None) is not None:
+            _prepare_deferred_custom_fields(document, action)
+            for field in action.assign_custom_fields.all():
+                _assign_deferred_custom_field(
+                    document,
+                    field,
+                    action.assign_custom_fields_values.get(str(field.pk), None),
+                )
+            return
         for field in action.assign_custom_fields.all():
             value_field_name = CustomFieldInstance.get_value_field_name(
                 data_type=field.data_type,
@@ -270,7 +431,15 @@ def apply_removal_to_document(
         for group in action.remove_change_groups.all():
             remove_perm("change_document", group, document)
 
-    if action.remove_all_custom_fields:
+    if getattr(document, "_deferred_metadata_guard", None) is not None and (
+        action.remove_all_custom_fields or action.has_remove_custom_fields
+    ):
+        _prepare_deferred_custom_fields(document, action)
+        field_ids = set(document._deferred_metadata_guard["relations"]["custom_fields"])
+        if not action.remove_all_custom_fields:
+            field_ids &= set(action.remove_custom_fields.values_list("pk", flat=True))
+        _remove_deferred_custom_fields(document, sorted(field_ids))
+    elif action.remove_all_custom_fields:
         CustomFieldInstance.objects.filter(document=document).hard_delete()
     elif action.has_remove_custom_fields:
         CustomFieldInstance.objects.filter(

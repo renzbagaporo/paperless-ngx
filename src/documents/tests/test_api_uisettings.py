@@ -1,11 +1,13 @@
 import json
+from unittest import mock
 
 from django.contrib.auth.models import Permission
 from django.test import override_settings
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from paperless.version import __full_version_str__
+from paperless import version
+from paperless.version import get_display_version
 from paperless_testing.dirs import DirectoriesMixin
 from paperless_testing.factories import UserFactory
 
@@ -50,7 +52,7 @@ class TestApiUiSettings(DirectoriesMixin, APITestCase):
         self.assertDictEqual(
             response.data["settings"],
             {
-                "version": __full_version_str__,
+                "version": get_display_version(),
                 "app_title": None,
                 "app_logo": None,
                 "auditlog_enabled": True,
@@ -88,6 +90,20 @@ class TestApiUiSettings(DirectoriesMixin, APITestCase):
         self.assertDictEqual(
             ui_settings.settings,
             settings["settings"],
+        )
+
+    def test_ui_footer_receives_the_packaged_personal_revision(self):
+        release = self.dirs.scratch_dir / "personal-release.txt"
+        release.write_text(
+            f"paperless-{version.__full_version_str__}-7\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(version, "PERSONAL_RELEASE_FILE", release):
+            response = self.client.get(self.ENDPOINT, format="json")
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(
+            response.data["settings"]["version"],
+            f"{version.__full_version_str__}-7 (personal)",
         )
 
     def test_api_set_ui_settings_insufficient_global_permissions(self) -> None:

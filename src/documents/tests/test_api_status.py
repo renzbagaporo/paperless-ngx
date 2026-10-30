@@ -93,6 +93,7 @@ class TestSystemStatus(APITestCase):
         """
         response = self.client.get(self.ENDPOINT)
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
         self.assertEqual(response["WWW-Authenticate"], "Token")
         normal_user = UserFactory(username="normal_user")
         self.client.force_login(normal_user)
@@ -100,6 +101,22 @@ class TestSystemStatus(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
         # test the permission helper function directly for good measure
         self.assertFalse(has_system_status_permission(None))
+
+    def test_system_status_exposes_personal_display_and_upstream_versions(self):
+        release = self.tmp_dir / "personal-release.txt"
+        release.write_text(
+            f"paperless-{version.__full_version_str__}-7\n",
+            encoding="utf-8",
+        )
+        self.client.force_login(self.user)
+        with mock.patch.object(version, "PERSONAL_RELEASE_FILE", release):
+            response = self.client.get(self.ENDPOINT)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["pngx_version"], version.__full_version_str__)
+        self.assertEqual(
+            response.data["pngx_display_version"],
+            f"{version.__full_version_str__}-7 (personal)",
+        )
 
     def test_system_status_with_system_status_permission(self) -> None:
         response = self.client.get(self.ENDPOINT)

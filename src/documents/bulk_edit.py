@@ -34,6 +34,7 @@ from documents.models import DocumentType
 from documents.models import PaperlessTask
 from documents.models import StoragePath
 from documents.models import Tag
+from documents.ocr_status import status_q
 from documents.permissions import set_permissions_for_objects
 from documents.plugins.helpers import DocumentsStatusManager
 from documents.tasks import bulk_update_documents
@@ -226,12 +227,31 @@ def remove_tag(doc_ids: list[int], tag: int) -> Literal["OK"]:
         document_id__in=doc_ids,
         tag_id__in=tag_ids,
     )
-    affected_docs = list(qs.values_list("document_id", flat=True).distinct())
-    qs.delete()
+    failure_ids = set(
+        Tag.objects.filter(status_q(("ocr-fail",)), pk__in=tag_ids).values_list(
+            "pk",
+            flat=True,
+        ),
+    )
+    with transaction.atomic():
+        affected_docs = list(qs.values_list("document_id", flat=True).distinct())
+        retry_docs = list(
+            qs.filter(tag_id__in=failure_ids)
+            .values_list("document_id", flat=True)
+            .distinct(),
+        )
+        qs.delete()
+    if failure_ids:
+        from documents.ocr_queue import enqueue_pending_ocr
+
+        enqueue_pending_ocr(retry_docs)
 
     if affected_docs:
+        kwargs = {"document_ids": affected_docs}
+        if failure_ids and set(tag_ids) <= failure_ids:
+            kwargs["ocr_retry_only_ids"] = affected_docs
         bulk_update_documents.apply_async(
-            kwargs={"document_ids": affected_docs},
+            kwargs=kwargs,
             headers={"trigger_source": PaperlessTask.TriggerSource.SYSTEM},
         )
 
@@ -261,7 +281,23 @@ def modify_tags(
         expanded_remove_tags.add(int(t.id))
         expanded_remove_tags.update(int(pk) for pk in t.get_descendants_pks())
 
+    failure_ids = set(
+        Tag.objects.filter(
+            status_q(("ocr-fail",)),
+            pk__in=expanded_remove_tags,
+        ).values_list("pk", flat=True),
+    )
+    retry_docs = []
     with transaction.atomic():
+        if failure_ids:
+            retry_docs = list(
+                DocumentTagRelationship.objects.filter(
+                    document_id__in=affected_docs,
+                    tag_id__in=failure_ids,
+                )
+                .values_list("document_id", flat=True)
+                .distinct(),
+            )
         if expanded_remove_tags:
             DocumentTagRelationship.objects.filter(
                 document_id__in=affected_docs,
@@ -290,9 +326,17 @@ def modify_tags(
                     ignore_conflicts=True,
                 )
 
+    if retry_docs:
+        from documents.ocr_queue import enqueue_pending_ocr
+
+        enqueue_pending_ocr(retry_docs)
+
     if affected_docs:
+        kwargs = {"document_ids": affected_docs}
+        if retry_docs and not expanded_add_tags and expanded_remove_tags <= failure_ids:
+            kwargs["ocr_retry_only_ids"] = retry_docs
         bulk_update_documents.apply_async(
-            kwargs={"document_ids": affected_docs},
+            kwargs=kwargs,
             headers={"trigger_source": PaperlessTask.TriggerSource.SYSTEM},
         )
 

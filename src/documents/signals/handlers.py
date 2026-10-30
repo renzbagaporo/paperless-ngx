@@ -4,6 +4,7 @@ import datetime
 import logging
 import shutil
 import traceback as _tb
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Any
@@ -23,6 +24,7 @@ from django.db import DatabaseError
 from django.db import close_old_connections
 from django.db import connections
 from django.db import models
+from django.db import transaction
 from django.db.models import Q
 from django.dispatch import receiver
 from django.utils import timezone
@@ -34,6 +36,11 @@ from documents.caching import clear_document_caches
 from documents.caching import invalidate_llm_suggestions_cache
 from documents.caching import invalidate_suggestions_cache
 from documents.data_models import ConsumableDocument
+from documents.deferred_ingestion import advance_metadata_guard
+from documents.deferred_ingestion import check_metadata_guard
+from documents.deferred_ingestion import expected_action_relations
+from documents.deferred_ingestion import expected_tag_relations
+from documents.deferred_ingestion import save_guarded_metadata
 from documents.file_handling import create_source_path_directory
 from documents.file_handling import delete_empty_directories
 from documents.file_handling import generate_filename
@@ -81,6 +88,7 @@ DRF_DATETIME_FIELD = serializers.DateTimeField()
 
 
 def add_inbox_tags(sender, document: Document, logging_group=None, **kwargs) -> None:
+    check_metadata_guard(document)
     if document.owner is not None:
         tags = get_objects_for_user_owner_aware(
             document.owner,
@@ -90,7 +98,9 @@ def add_inbox_tags(sender, document: Document, logging_group=None, **kwargs) -> 
     else:
         tags = Tag.objects.all()
     inbox_tags = tags.filter(is_inbox_tag=True)
+    expected_relations = expected_tag_relations(document, added=inbox_tags)
     document.add_nested_tags(inbox_tags)
+    advance_metadata_guard(document, expected_relations=expected_relations)
 
 
 def set_correspondent(
@@ -121,6 +131,7 @@ def set_correspondent(
         The correspondent that was (or would be) assigned, or None if no match
         was found or assignment was skipped.
     """
+    check_metadata_guard(document)
     if document.correspondent and not replace:
         return None
 
@@ -149,7 +160,7 @@ def set_correspondent(
             extra={"group": logging_group},
         )
         document.correspondent = selected
-        document.save(update_fields=("correspondent",))
+        save_guarded_metadata(document, ("correspondent",))
 
     return selected
 
@@ -182,6 +193,7 @@ def set_document_type(
         The document type that was (or would be) assigned, or None if no match
         was found or assignment was skipped.
     """
+    check_metadata_guard(document)
     if document.document_type and not replace:
         return None
 
@@ -210,7 +222,7 @@ def set_document_type(
             extra={"group": logging_group},
         )
         document.document_type = selected
-        document.save(update_fields=("document_type",))
+        save_guarded_metadata(document, ("document_type",))
 
     return selected
 
@@ -245,6 +257,7 @@ def set_tags(
         tags_removed is always an empty set. In dry_run mode, neither set
         is applied to the database.
     """
+    check_metadata_guard(document)
     # Compute which tags would be removed under replace mode.
     # The filter mirrors the .delete() call below: keep inbox tags and
     # manually-added tags (match="" and not auto-matched).
@@ -269,13 +282,16 @@ def set_tags(
     current_tags = set(document.tags.all())
     matched_tags = matching.match_tags(document, classifier)
     tags_to_add = set(matched_tags) - current_tags
+    check_metadata_guard(document)
 
     if tags_to_add and not dry_run:
         logger.info(
             f'Tagging "{document}" with "{", ".join(t.name for t in tags_to_add)}"',
             extra={"group": logging_group},
         )
+        expected_relations = expected_tag_relations(document, added=tags_to_add)
         document.add_nested_tags(tags_to_add)
+        advance_metadata_guard(document, expected_relations=expected_relations)
 
     return tags_to_add, tags_to_remove
 
@@ -308,6 +324,7 @@ def set_storage_path(
         The storage path that was (or would be) assigned, or None if no match
         was found or assignment was skipped.
     """
+    check_metadata_guard(document)
     if document.storage_path and not replace:
         return None
 
@@ -336,7 +353,7 @@ def set_storage_path(
             extra={"group": logging_group},
         )
         document.storage_path = selected
-        document.save(update_fields=("storage_path",))
+        save_guarded_metadata(document, ("storage_path",))
 
     return selected
 
@@ -433,6 +450,84 @@ def _filename_template_uses_custom_fields(doc: Document) -> bool:
     return "custom_fields" in template
 
 
+@receiver(models.signals.m2m_changed, sender=Document.tags.through, weak=False)
+def retry_ocr_when_failure_tag_removed(
+    sender,
+    instance,
+    action,
+    reverse,
+    pk_set,
+    **kwargs,
+):
+    """Removing the failure tag explicitly retries saved OCR work after commit."""
+    if reverse:
+        return
+    from documents.ocr_status import status_q
+
+    if action == "pre_clear":
+        instance._removed_ocr_failure = instance.tags.filter(
+            status_q(("ocr-fail",)),
+        ).exists()
+        return
+    removed = (
+        action == "post_remove"
+        and Tag.objects.filter(
+            status_q(("ocr-fail",)),
+            pk__in=pk_set or [],
+        ).exists()
+    ) or (action == "post_clear" and getattr(instance, "_removed_ocr_failure", False))
+    if not removed:
+        return
+    from documents.ocr_queue import enqueue_pending_ocr
+
+    enqueue_pending_ocr([instance.pk])
+
+
+@contextmanager
+def _document_rename_lock(instance: Document):
+    """Hold row then media through our commit and any filename compensation."""
+    before = []
+    media = None
+    try:
+        with transaction.atomic():
+            Document.global_objects.select_for_update().get(pk=instance.pk)
+            media = FileLock(settings.MEDIA_LOCK)
+            media.acquire()
+            instance.refresh_from_db(from_queryset=Document.global_objects.all())
+            before = [
+                ("source_path", instance.source_path, instance.checksum),
+                ("archive_path", instance.archive_path, instance.archive_checksum),
+            ]
+            yield
+    except DatabaseError:
+        # MEDIA remains held through COMMIT/rollback, so another installer
+        # cannot reuse an old pathname before compensation finishes. A fresh
+        # plain read suffices: all physical writers need this same media lock.
+        # Never reacquire a blocking row lock here, since rollback released it.
+        current = Document.global_objects.filter(pk=instance.pk).first()
+        if current is not None and media is not None and media.is_locked:
+            from documents.file_updates import _is_referenced
+
+            for field, previous, expected_checksum in before:
+                moved = getattr(instance, field)
+                if previous is None or moved is None or previous == moved:
+                    continue
+                if (
+                    getattr(current, field) == previous
+                    and not previous.exists()
+                    and moved.is_file()
+                    and not _is_referenced(moved)
+                    and _path_matches_checksum(moved, expected_checksum)
+                ):
+                    create_source_path_directory(previous)
+                    shutil.move(moved, previous)
+            instance.refresh_from_db(from_queryset=Document.global_objects.all())
+        raise
+    finally:
+        if media is not None:
+            media.release()
+
+
 # should be disabled in /src/documents/management/commands/document_importer.py handle
 @receiver(models.signals.post_save, sender=CustomFieldInstance, weak=False)
 @receiver(models.signals.m2m_changed, sender=Document.tags.through, weak=False)
@@ -479,7 +574,7 @@ def update_filename_and_move_files(
         # This will in turn cause this logic to move the file where it belongs.
         return
 
-    with FileLock(settings.MEDIA_LOCK):
+    with _document_rename_lock(instance):
         try:
             # If this was waiting for the lock, the filename or archive_filename
             # of this document may have been updated.  This happens if multiple updates
@@ -828,13 +923,30 @@ def run_workflows_updated(
     sender,
     document: Document,
     logging_group: uuid.UUID | None = None,
+    original_file=None,
     **kwargs,
 ) -> None:
-    run_workflows(
-        trigger_type=WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED,
-        document=document,
-        logging_group=logging_group,
-    )
+    from documents.deferred_ingestion import current_attachment
+    from documents.ocr_queue import pending_pages
+    from documents.versioning import get_latest_version_for_root
+
+    if pending_pages(get_latest_version_for_root(document)):
+        return
+    if original_file is not None:
+        run_workflows(
+            trigger_type=WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED,
+            document=document,
+            logging_group=logging_group,
+            original_file=original_file,
+        )
+    else:
+        with current_attachment(document) as attachment:
+            run_workflows(
+                trigger_type=WorkflowTrigger.WorkflowTriggerType.DOCUMENT_UPDATED,
+                document=document,
+                logging_group=logging_group,
+                original_file=attachment,
+            )
 
 
 def send_websocket_document_updated(
@@ -899,12 +1011,16 @@ def run_workflows(
     messages = []
 
     workflows = get_workflows_for_trigger(trigger_type, workflow_to_run)
+    deferred_actions = getattr(document, "_deferred_workflow_actions", None)
+    if deferred_actions is not None:
+        workflows = workflows.filter(pk__in=[int(pk) for pk in deferred_actions])
 
     for workflow in workflows:
         if not use_overrides:
             if TYPE_CHECKING:
                 assert isinstance(document, Document)
             try:
+                check_metadata_guard(document)
                 # This can be called from bulk_update_documents, which may be running multiple times
                 # Refresh this so the matching data is fresh and instance fields are re-freshed
                 # Otherwise, this instance might be behind and overwrite the work another process did
@@ -925,10 +1041,34 @@ def run_workflows(
                 )
                 break
 
+        direct_fields = (
+            "title",
+            "correspondent",
+            "document_type",
+            "storage_path",
+            "owner",
+        )
+        before_fields = (
+            {
+                field: getattr(document, Document._meta.get_field(field).attname)
+                for field in direct_fields
+            }
+            if not use_overrides
+            else {}
+        )
+
         if matching.document_matches_workflow(document, workflow, trigger_type):
             action: WorkflowAction
             has_move_to_trash_action = False
+            deferred_ai_jobs = []
             for action in workflow.actions.order_by("order", "pk"):
+                if deferred_actions is not None and (
+                    deferred_actions.get(str(workflow.pk), {}).get(str(action.pk))
+                    != action.type
+                ):
+                    continue
+                if not use_overrides:
+                    check_metadata_guard(document)
                 message = f"Applying {action} from {workflow}"
                 if not use_overrides:
                     logger.info(message, extra={"group": logging_group})
@@ -939,16 +1079,26 @@ def run_workflows(
                     if use_overrides and overrides:
                         apply_assignment_to_overrides(action, overrides)
                     else:
+                        expected_relations = expected_action_relations(document, action)
                         apply_assignment_to_document(
                             action,
                             document,
                             logging_group,
                         )
+                        advance_metadata_guard(
+                            document,
+                            expected_relations=expected_relations,
+                        )
                 elif action.type == WorkflowAction.WorkflowActionType.REMOVAL:
                     if use_overrides and overrides:
                         apply_removal_to_overrides(action, overrides)
                     else:
+                        expected_relations = expected_action_relations(document, action)
                         apply_removal_to_document(action, document)
+                        advance_metadata_guard(
+                            document,
+                            expected_relations=expected_relations,
+                        )
                 elif action.type == WorkflowAction.WorkflowActionType.EMAIL:
                     context = build_workflow_action_context(document, overrides)
                     execute_email_action(
@@ -1008,10 +1158,13 @@ def run_workflows(
 
                         # kwargs so the PaperlessTask record can note the
                         # document, see _extract_input_data
-                        apply_ai_suggestions.delay_on_commit(
-                            action_id=action.pk,
-                            document_id=document.pk,
-                        )
+                        if deferred_actions is None:
+                            apply_ai_suggestions.delay_on_commit(
+                                action_id=action.pk,
+                                document_id=document.pk,
+                            )
+                        else:
+                            deferred_ai_jobs.append(action.pk)
 
             if not use_overrides:
                 # limit title to 128 characters
@@ -1025,16 +1178,28 @@ def run_workflows(
                 # one (see: https://github.com/paperless-ngx/paperless-ngx/issues/12386).
                 # modified has auto_now=True but is not auto-added when update_fields
                 # is specified, so it must be listed explicitly.
-                document.save(
-                    update_fields=[
-                        "title",
-                        "correspondent",
-                        "document_type",
-                        "storage_path",
-                        "owner",
-                        "modified",
-                    ],
-                )
+                if getattr(document, "_deferred_metadata_guard", None) is None:
+                    document.save(update_fields=[*direct_fields, "modified"])
+                else:
+                    changed_fields = [
+                        field
+                        for field in direct_fields
+                        if getattr(document, Document._meta.get_field(field).attname)
+                        != before_fields[field]
+                    ]
+                    save_guarded_metadata(document, [*changed_fields, "modified"])
+
+                for action_id in deferred_ai_jobs:
+                    from documents.workflows.ai import ai_metadata_snapshot
+
+                    expected = ai_metadata_snapshot(document)
+                    if getattr(document, "_deferred_created_override", False):
+                        expected["preserve_created"] = True
+                    apply_ai_suggestions.delay_on_commit(
+                        action_id=action_id,
+                        document_id=document.pk,
+                        expected_metadata=expected,
+                    )
 
             WorkflowRun.objects.create(
                 workflow=workflow,
@@ -1429,11 +1594,24 @@ def add_or_update_document_in_llm_index(sender, document, **kwargs):
     """
     if kwargs.get("skip_ai_index"):
         return
+    from django.db import transaction
+
     ai_config = AIConfig()
     if ai_config.llm_index_enabled:
-        from documents.tasks import update_document_in_llm_index
+        from documents.ocr_index import mark_pending
+        from documents.ocr_index import queue_complete_index
+        from documents.page_data import stored_pages
+        from documents.versioning import get_latest_version_for_root
 
-        update_document_in_llm_index.apply_async(kwargs={"document": document})
+        root = document.root_document or document
+        current = get_latest_version_for_root(root)
+        if stored_pages(current):
+            mark_pending(root)
+            transaction.on_commit(lambda: queue_complete_index(current.pk), robust=True)
+        else:
+            from documents.tasks import update_document_in_llm_index
+
+            update_document_in_llm_index.apply_async(kwargs={"document": document})
 
 
 @receiver(models.signals.post_delete, sender=Document)

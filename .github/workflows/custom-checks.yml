@@ -24,12 +24,24 @@ jobs:
         run: python3 -m unittest discover -s .github/scripts -p 'test_personal_release.py' -v
   backend:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [sqlite, postgres]
     container:
       image: ghcr.io/paperless-ngx/paperless-ngx:3.3.4
       options: --user 0
     services:
       redis:
         image: valkey/valkey:9.1.2-alpine
+      postgres:
+        image: postgres:18.6
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_USER: paperless
+          POSTGRES_DB: paperless_ci
+        options: >-
+          --health-cmd "pg_isready -U paperless -d paperless_ci" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       HOME: /tmp/paperless-custom-home
       PAPERLESS_SECRET_KEY: isolated-test-only-key
@@ -38,6 +50,11 @@ jobs:
       PAPERLESS_SCRATCH_DIR: /tmp/paperless-custom-scratch
       PAPERLESS_CONSUMPTION_DIR: /tmp/paperless-custom-consume
       PAPERLESS_REDIS: redis://redis:6379
+      PAPERLESS_DBENGINE: ${{ matrix.database == 'postgres' && 'postgresql' || 'sqlite' }}
+      PAPERLESS_DBHOST: ${{ matrix.database == 'postgres' && 'postgres' || '' }}
+      PAPERLESS_DBUSER: paperless
+      PAPERLESS_DBNAME: paperless_ci
+      PNGX_CONTAINERIZED: '0'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -51,11 +68,46 @@ jobs:
           ruff check --no-fix src
           ruff format --check src
       - name: Test document updates and OCR
+        if: matrix.database == 'sqlite'
         run: |
-          pytest -o addopts='' --basetemp=/tmp/paperless-custom-pytest \
+          chown -R paperless:paperless \
+            "$HOME" "$PAPERLESS_DATA_DIR" "$PAPERLESS_MEDIA_ROOT" \
+            "$PAPERLESS_SCRATCH_DIR" "$PAPERLESS_CONSUMPTION_DIR"
+          runuser --preserve-environment --user paperless -- \
+            pytest -o addopts='' -o cache_dir="$HOME/.cache/pytest" \
+            --basetemp=/tmp/paperless-custom-pytest \
             src/documents/tests/test_file_updates.py \
             src/documents/tests/test_pdf_editor_updates.py \
             src/documents/tests/test_ingestion_checks.py \
+            src/documents/tests/test_remote_ocr_resilience.py \
+            src/documents/tests/test_deferred_ingestion.py \
+            src/documents/tests/test_ocr_status.py \
+            src/documents/tests/test_ocr_recovery.py \
+            src/documents/tests/test_ocr_index.py \
+            src/documents/tests/test_ocr_storage_policy.py \
+            src/documents/tests/test_ocr_interactions.py \
+            src/documents/tests/test_ocr_lifecycle_transactions.py \
+            src/documents/tests/test_ocr_review_regressions.py \
+            src/documents/tests/test_file_cleanup_recovery.py \
+            src/documents/tests/test_storage_review_regressions.py \
+            src/documents/tests/test_deferred_metadata_concurrency.py \
+            src/documents/tests/test_ocr_adversarial_regressions.py \
+            src/documents/tests/test_ocr_index_adversarial.py \
+            src/documents/tests/test_paid_ocr_recovery.py \
+            src/documents/tests/test_paid_reprocess_recovery.py \
+            src/documents/tests/test_layout_orientation.py \
+            src/documents/tests/test_legacy_image_reprocess.py \
+            src/documents/tests/test_initial_image_archive_policy.py \
+            src/documents/tests/test_index_ingestion_publication.py \
+            src/documents/tests/test_automatic_compaction.py \
+            src/documents/tests/test_root_reprocess_concurrency.py \
+            src/documents/tests/test_never_ocr_retry.py \
+            src/documents/tests/test_provider_numeric_validation.py \
+            src/documents/tests/test_source_pdf_text_boundary.py \
+            src/documents/tests/test_ocr_index_concurrency.py \
+            src/documents/tests/test_ocr_index_write_fence.py \
+            src/documents/tests/test_page_data.py \
+            src/documents/tests/test_tasks.py \
             src/documents/tests/test_consumer.py \
             src/documents/tests/test_bulk_edit.py \
             src/documents/tests/test_api_bulk_edit.py \
@@ -66,10 +118,58 @@ jobs:
             src/documents/tests/test_version_conditionals.py \
             src/documents/tests/test_task_signals.py \
             src/documents/tests/test_api_tasks.py \
+            src/documents/tests/test_api_uisettings.py \
+            src/documents/tests/test_api_status.py::TestSystemStatus::test_system_status_exposes_personal_display_and_upstream_versions \
             src/paperless/tests/parsers/test_llamaparse_parser.py \
             src/paperless/tests/parsers/test_remote_parser.py \
             src/paperless/tests/test_registry.py \
-            src/paperless/tests/test_remote_ocr_config.py
+            src/paperless/tests/test_remote_ocr_config.py \
+            src/paperless/tests/settings/test_custom_parsers.py \
+            src/paperless/tests/test_personal_version.py
+      - name: Test native import and export in a separate process
+        if: matrix.database == 'sqlite'
+        # The CLI importer disables process-global audit receivers for its import.
+        run: |
+          runuser --preserve-environment --user paperless -- \
+            pytest -o addopts='' -o cache_dir="$HOME/.cache/pytest-native" \
+            --basetemp=/tmp/paperless-custom-native-pytest \
+            src/documents/tests/test_management_exporter.py \
+            src/documents/tests/test_management_importer.py
+      - name: Test PostgreSQL transactions and OCR recovery
+        if: matrix.database == 'postgres'
+        run: |
+          chown -R paperless:paperless \
+            "$HOME" "$PAPERLESS_DATA_DIR" "$PAPERLESS_MEDIA_ROOT" \
+            "$PAPERLESS_SCRATCH_DIR" "$PAPERLESS_CONSUMPTION_DIR"
+          runuser --preserve-environment --user paperless -- \
+            pytest -o addopts='' -o cache_dir="$HOME/.cache/pytest" \
+            --basetemp=/tmp/paperless-custom-pytest \
+            src/documents/tests/test_file_cleanup_recovery.py \
+            src/documents/tests/test_storage_review_regressions.py \
+            src/documents/tests/test_deferred_metadata_concurrency.py \
+            src/documents/tests/test_ocr_adversarial_regressions.py \
+            src/documents/tests/test_ocr_index_adversarial.py \
+            src/documents/tests/test_paid_ocr_recovery.py \
+            src/documents/tests/test_paid_reprocess_recovery.py \
+            src/documents/tests/test_layout_orientation.py \
+            src/documents/tests/test_legacy_image_reprocess.py \
+            src/documents/tests/test_initial_image_archive_policy.py \
+            src/documents/tests/test_index_ingestion_publication.py \
+            src/documents/tests/test_automatic_compaction.py \
+            src/documents/tests/test_root_reprocess_concurrency.py \
+            src/documents/tests/test_never_ocr_retry.py \
+            src/documents/tests/test_provider_numeric_validation.py \
+            src/documents/tests/test_source_pdf_text_boundary.py \
+            src/documents/tests/test_ocr_index_concurrency.py \
+            src/documents/tests/test_ocr_index_write_fence.py \
+            src/documents/tests/test_ocr_review_regressions.py \
+            src/documents/tests/test_ocr_lifecycle_transactions.py \
+            src/documents/tests/test_remote_ocr_resilience.py \
+            src/documents/tests/test_deferred_ingestion.py \
+            src/documents/tests/test_ocr_recovery.py \
+            src/documents/tests/test_ocr_index.py \
+            src/documents/tests/test_ocr_storage_policy.py \
+            src/documents/tests/test_ocr_interactions.py
       - name: Check migrations
         run: python3 src/manage.py makemigrations --check --dry-run
   frontend:
@@ -97,5 +197,7 @@ jobs:
             src/app/components/document-detail/document-version-dropdown/document-version-dropdown.component.spec.ts \
             src/app/components/document-detail/document-detail.component.spec.ts \
             src/app/services/rest/document.service.spec.ts \
-            src/app/components/admin/config/config.component.spec.ts
+            src/app/components/admin/config/config.component.spec.ts \
+            src/app/components/app-frame/app-frame.component.spec.ts \
+            src/app/components/common/system-status-dialog/system-status-dialog.component.spec.ts
       - run: pnpm exec ng build --configuration production

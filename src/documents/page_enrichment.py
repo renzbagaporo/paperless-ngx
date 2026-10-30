@@ -15,6 +15,7 @@ from documents.models import DocumentPage
 from documents.page_data import backfill_document
 from documents.page_data import checksum
 from documents.page_data import parser_pages
+from documents.page_data import preserve_page_state
 from documents.page_data import stored_pages
 from documents.utils import compute_checksum
 from paperless.config import RemoteOCRConfig
@@ -28,7 +29,11 @@ def missing_rich_pages(document: Document) -> int:
             return document.page_count
         with pikepdf.open(document.archive_path or document.source_path) as pdf:
             return len(pdf.pages)
-    return sum(page["layout"] is None or page["markdown"] is None for page in pages)
+    return sum(
+        (page["layout"] is None or page["markdown"] is None)
+        and page["provenance"].get("ocr_status") != "pending"
+        for page in pages
+    )
 
 
 def enrich_document(document_id: int, *, max_pages: int) -> int:
@@ -47,7 +52,6 @@ def enrich_document(document_id: int, *, max_pages: int) -> int:
     with FileLock(settings.DATA_DIR / f"document-file-{root_id}.lock"):
         document.refresh_from_db()
         expected_checksum = checksum(document)
-        source = document.archive_path or document.source_path
         with tempfile.TemporaryDirectory(dir=settings.SCRATCH_DIR) as temporary:
             subset = Path(temporary) / "page.pdf"
             for page in document.parsed_pages.order_by("page"):
@@ -55,9 +59,15 @@ def enrich_document(document_id: int, *, max_pages: int) -> int:
                     break
                 if page.file_checksum != expected_checksum:
                     raise ValueError("Page data belongs to a different file revision.")
+                if page.provenance.get("ocr_status") == "pending":
+                    continue
                 if page.layout is not None and page.markdown is not None:
                     continue
                 with FileLock(settings.MEDIA_LOCK):
+                    document.refresh_from_db()
+                    source = document.archive_path or document.source_path
+                    if checksum(document) != expected_checksum:
+                        raise ValueError("Document file changed during enrichment.")
                     if compute_checksum(source) != expected_checksum:
                         raise ValueError("Stored file checksum changed.")
                     with pikepdf.open(source) as original, pikepdf.new() as output:
@@ -76,23 +86,28 @@ def enrich_document(document_id: int, *, max_pages: int) -> int:
                         "job_page": 1,
                     }
                     evidence = parser_pages(parser, subset)[0]
-                with transaction.atomic(), FileLock(settings.MEDIA_LOCK):
+                with transaction.atomic():
                     current = Document.objects.select_for_update().get(pk=document_id)
-                    if (
-                        checksum(current) != expected_checksum
-                        or compute_checksum(source) != expected_checksum
-                    ):
-                        raise ValueError(
-                            "Document changed during enrichment; result not attached.",
-                        )
-                    # Origin tracks the physical page through later splits/reorders.
-                    evidence["origin"] = page.origin
-                    evidence["source_page"] = page.source_page
-                    evidence["rotation"] = page.rotation
-                    evidence["provenance"]["layout_rotation"] = page.rotation
-                    DocumentPage.objects.filter(
-                        pk=page.pk,
-                        file_checksum=expected_checksum,
-                    ).update(**evidence)
+                    with FileLock(settings.MEDIA_LOCK):
+                        if (
+                            checksum(current) != expected_checksum
+                            or compute_checksum(
+                                current.archive_path or current.source_path,
+                            )
+                            != expected_checksum
+                        ):
+                            raise ValueError(
+                                "Document changed during enrichment; result not attached.",
+                            )
+                        # Origin tracks the physical page through later splits/reorders.
+                        evidence["origin"] = page.origin
+                        evidence["source_page"] = page.source_page
+                        evidence["rotation"] = page.rotation
+                        evidence["provenance"]["layout_rotation"] = page.rotation
+                        preserve_page_state(page.provenance, evidence["provenance"])
+                        DocumentPage.objects.filter(
+                            pk=page.pk,
+                            file_checksum=expected_checksum,
+                        ).update(**evidence)
                 completed += 1
     return completed

@@ -144,6 +144,38 @@ class PdfEditorUpdateTests(DirectoriesMixin, TestCase):
         self.assertNotIn("Deleted notice", version.content)
         self.assertFalse(version.has_archive_version)
 
+    def test_rotation_and_reorder_preserve_manually_edited_content(self):
+        from documents.page_data import pages_for_file
+
+        pages_for_file(self.root, self.root.source_path)
+        self.root.content = "My corrected transcript, including handwritten context"
+        self.root.save(update_fields=["content"])
+        self.edit(operations=[{"page": 3, "rotate": 90}, {"page": 1}, {"page": 2}])
+        self.root.refresh_from_db()
+        self.assertEqual(
+            self.root.content,
+            "My corrected transcript, including handwritten context",
+        )
+        self.assertEqual(widths(self.root.source_path), [300, 100, 200])
+        self.registry.assert_not_called()
+
+    def test_rotation_preserves_an_explicitly_cleared_body(self):
+        from documents.page_data import pages_for_file
+        from documents.page_data import save_pages
+
+        save_pages(
+            self.root,
+            pages_for_file(self.root, self.root.source_path),
+            automatic_content=self.root.content,
+        )
+        self.root.content = ""
+        self.root.save(update_fields=["content"])
+        self.edit(operations=[{"page": 3, "rotate": 90}, {"page": 1}, {"page": 2}])
+        self.root.refresh_from_db()
+        self.assertEqual(self.root.content, "")
+        self.assertEqual(widths(self.root.source_path), [300, 100, 200])
+        self.registry.assert_not_called()
+
     def test_atomic_append_keeps_editor_operations_and_only_parses_new_scan(self):
         upload = searchable_pdf(self.dirs.scratch_dir / "new.pdf", ["New notice"])
         old = self.root.source_path
@@ -369,6 +401,124 @@ class PdfEditorUpdateApiTests(DirectoriesMixin, APITestCase):
         }
         data.update(kwargs)
         return self.client.post("/api/documents/edit_pdf/", data, format="json")
+
+    def run_duplicate_edit(self):
+        from documents.tasks import update_document_file
+
+        grant_global(self.user, "delete_document")
+        with mock.patch(
+            "documents.tasks.update_document_file.apply_async",
+            return_value=SimpleNamespace(id="duplicate-edit-task"),
+        ) as queue:
+            response = self.post_edit(
+                operations=[{"page": 1}, {"page": 1}],
+                keep_only_current_file=True,
+            )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(
+            response.data,
+            {"result": "OK", "task_id": "duplicate-edit-task"},
+        )
+        task_kwargs = queue.call_args.kwargs["kwargs"]
+        self.assertEqual(task_kwargs["operations"], [{"page": 1}, {"page": 1}])
+        thumbnail = self.dirs.scratch_dir / "duplicate.webp"
+        thumbnail.write_bytes(b"duplicate thumbnail")
+        with (
+            mock.patch("documents.tasks.ProgressManager"),
+            mock.patch("documents.file_updates._publish"),
+            mock.patch("documents.file_updates.get_parser_registry") as registry,
+            mock.patch(
+                "documents.file_updates.make_thumbnail_from_pdf",
+                return_value=thumbnail,
+            ),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            update_document_file.run(**task_kwargs)
+        registry.assert_not_called()
+        self.root.refresh_from_db()
+        self.assertEqual(self.root.page_count, 2)
+        self.assertEqual(widths(self.root.source_path), [100, 100])
+
+    def test_duplicate_page_edit_keeps_manual_aggregate(self):
+        from documents.page_data import pages_for_file
+        from documents.page_data import save_pages
+        from documents.page_data import stored_pages
+
+        save_pages(
+            self.root,
+            pages_for_file(self.root, self.root.source_path),
+            automatic_content=self.root.content,
+        )
+        original_page = stored_pages(self.root)[0]
+        manual = "Human archival correction retained with the original page"
+        self.root.content = manual
+        self.root.save(update_fields=["content"])
+
+        self.run_duplicate_edit()
+
+        self.assertEqual(self.root.content, manual)
+        pages = stored_pages(self.root)
+        self.assertEqual(
+            [page["origin"] for page in pages],
+            [original_page["origin"]] * 2,
+        )
+        self.assertEqual([page["text"] for page in pages], [original_page["text"]] * 2)
+        self.assertTrue(all(page["provenance"]["manual_content"] for page in pages))
+
+    def test_duplicate_page_edit_preserves_explicitly_cleared_body(self):
+        from documents.page_data import pages_for_file
+        from documents.page_data import save_pages
+        from documents.page_data import stored_pages
+
+        save_pages(
+            self.root,
+            pages_for_file(self.root, self.root.source_path),
+            automatic_content=self.root.content,
+        )
+        self.root.content = ""
+        self.root.save(update_fields=["content"])
+
+        self.run_duplicate_edit()
+
+        self.assertEqual(self.root.content, "")
+        self.assertEqual(
+            [page["text"] for page in stored_pages(self.root)],
+            ["Original notice", "Original notice"],
+        )
+
+    def test_duplicate_subset_rebuilds_content_when_original_page_removed(self):
+        from documents.page_data import pages_for_file
+        from documents.page_data import save_pages
+        from documents.page_data import stored_pages
+
+        searchable_pdf(self.root.source_path, ["First notice", "Second notice"])
+        Document.objects.filter(pk=self.root.pk).update(
+            content="First notice\n\nSecond notice",
+            checksum=compute_checksum(self.root.source_path),
+            page_count=2,
+        )
+        self.root.refresh_from_db()
+        save_pages(
+            self.root,
+            pages_for_file(self.root, self.root.source_path),
+            automatic_content=self.root.content,
+        )
+        self.root.content = "Manual aggregate covering both original pages"
+        self.root.save(update_fields=["content"])
+
+        self.run_duplicate_edit()
+
+        self.assertEqual(self.root.content, "First notice\n\nFirst notice")
+        self.assertEqual(
+            [page["text"] for page in stored_pages(self.root)],
+            ["First notice", "First notice"],
+        )
+        self.assertFalse(
+            any(
+                page["provenance"].get("manual_content")
+                for page in stored_pages(self.root)
+            ),
+        )
 
     def test_native_edit_queues_owned_task_with_checksum_without_add_permission(self):
         with mock.patch(

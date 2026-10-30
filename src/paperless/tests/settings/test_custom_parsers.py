@@ -248,6 +248,14 @@ def make_expected_schedule(
                 "headers": {"trigger_source": "scheduled"},
             },
         },
+        "Reconcile saved OCR work": {
+            "task": "documents.tasks.reconcile_queued_ocr",
+            "schedule": crontab(minute="*"),
+            "options": {
+                "expires": 55.0,
+                "headers": {"trigger_source": "scheduled"},
+            },
+        },
     }
 
     overrides = overrides or {}
@@ -289,6 +297,20 @@ class TestParseBeatSchedule:
                 id="index-disabled",
             ),
             pytest.param(
+                {"PAPERLESS_OCR_RECOVERY_TASK_CRON": "disable"},
+                make_expected_schedule(disabled={"Reconcile saved OCR work"}),
+                id="ocr-recovery-disabled",
+            ),
+            pytest.param(
+                {"PAPERLESS_OCR_RECOVERY_TASK_CRON": "*/5 * * * *"},
+                make_expected_schedule(
+                    overrides={
+                        "Reconcile saved OCR work": {"schedule": crontab(minute="*/5")},
+                    },
+                ),
+                id="ocr-recovery-changed",
+            ),
+            pytest.param(
                 {
                     "PAPERLESS_EMAIL_TASK_CRON": "disable",
                     "PAPERLESS_TRAIN_TASK_CRON": "disable",
@@ -298,6 +320,7 @@ class TestParseBeatSchedule:
                     "PAPERLESS_WORKFLOW_SCHEDULED_TASK_CRON": "disable",
                     "PAPERLESS_LLM_INDEX_TASK_CRON": "disable",
                     "PAPERLESS_SHARE_LINK_BUNDLE_CLEANUP_CRON": "disable",
+                    "PAPERLESS_OCR_RECOVERY_TASK_CRON": "disable",
                 },
                 {},
                 id="all-disabled",
@@ -313,7 +336,7 @@ class TestParseBeatSchedule:
         mocker.patch.dict(
             os.environ,
             {"PAPERLESS_SECRET_KEY": "test-secret", **env},
-            clear=False,
+            clear=True,
         )
         schedule = parse_beat_schedule()
         assert schedule == expected

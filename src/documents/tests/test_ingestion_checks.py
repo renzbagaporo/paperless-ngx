@@ -139,20 +139,23 @@ def test_checks_fail_soft_without_logging_text(enabled, caplog):
 
 
 @pytest.mark.django_db
-def test_notes_preserve_metadata_and_use_page_offsets():
+def test_notes_preserve_metadata_and_use_page_offsets(
+    django_capture_on_commit_callbacks,
+):
     document = DocumentFactory(title="Water Supply Notices", created=date(2020, 1, 2))
     checks = IngestionChecks(
         date(2024, 6, 28),
         "Printed-date review: check date",
         (1, 3),
     )
-    apply_ingestion_checks(document, checks, page_offset=4, preserve_metadata=True)
-    apply_ingestion_checks(document, checks, page_offset=4, preserve_metadata=True)
+    with django_capture_on_commit_callbacks(execute=True):
+        apply_ingestion_checks(document, checks, page_offset=4, preserve_metadata=True)
+        apply_ingestion_checks(document, checks, page_offset=4, preserve_metadata=True)
     document.refresh_from_db()
     assert document.title == "Water Supply Notices"
     assert document.created == date(2020, 1, 2)
     assert document.notes.count() == 2
-    assert document.tags.count() == 0
+    assert list(document.tags.values_list("name", flat=True)) == ["ocr-review"]
     assert "5, 7" in document.notes.last().note
 
 

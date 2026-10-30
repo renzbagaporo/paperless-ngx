@@ -3,7 +3,9 @@ from datetime import date
 from datetime import datetime
 from typing import TypeVar
 
+from django.conf import settings
 from django.contrib.auth.models import User
+from django.utils import timezone
 
 from documents.models import Correspondent
 from documents.models import Document
@@ -38,6 +40,44 @@ DIRECT_FIELDS: dict[str, str] = {
     AISuggestionField.STORAGE_PATH: "storage_path",
     AISuggestionField.CREATED: "created",
 }
+
+
+def ai_metadata_snapshot(document: Document) -> dict:
+    from documents.ocr_status import status_q
+
+    result = {"owner_id": document.owner_id}
+    for field, attribute in DIRECT_FIELDS.items():
+        if attribute in {"correspondent", "document_type", "storage_path"}:
+            attribute += "_id"
+        value = getattr(document, attribute)
+        result[field] = value.isoformat() if isinstance(value, date) else value
+    result[AISuggestionField.TAGS] = sorted(
+        document.tags.exclude(status_q()).values_list(
+            "pk",
+            flat=True,
+        ),
+    )
+    return result
+
+
+def _unchanged_fields(
+    document: Document,
+    selected: set[str],
+    expected: dict | None,
+) -> set[str]:
+    if expected is None:
+        return selected
+    actual = ai_metadata_snapshot(document)
+    if actual["owner_id"] != expected["owner_id"]:
+        return set()
+    return {
+        field
+        for field in selected
+        if actual.get(field) == expected.get(field)
+        and not (
+            field == AISuggestionField.CREATED and expected.get("preserve_created")
+        )
+    }
 
 
 def resolve_date(dates: list[str]) -> date | None:
@@ -114,6 +154,8 @@ def apply_ai_suggestions_to_document(
     action: WorkflowAction,
     document: Document,
     logging_group=None,
+    *,
+    expected_metadata: dict | None = None,
 ) -> list[str]:
     """
     Get suggestions about `document` and write the chosen fields.
@@ -138,7 +180,11 @@ def apply_ai_suggestions_to_document(
         )
         return []
 
-    if not document.content.strip():
+    selected = _unchanged_fields(document, selected, expected_metadata)
+    if not selected:
+        return []
+
+    if not document.get_effective_content().strip():
         logger.warning(
             "Document %s has no content, skipping AI suggestions for workflow "
             "action %s",
@@ -168,6 +214,33 @@ def apply_ai_suggestions_to_document(
         )
         return []
 
+    return _apply_suggestions(
+        action,
+        document,
+        suggestions,
+        selected,
+        logging_group,
+        expected_metadata=expected_metadata,
+    )
+
+
+def _apply_suggestions(
+    action,
+    document,
+    suggestions,
+    selected,
+    logging_group,
+    *,
+    expected_metadata=None,
+) -> list[str]:
+    if expected_metadata is not None:
+        document.refresh_from_db()
+    selected = _unchanged_fields(document, selected, expected_metadata)
+    if not selected:
+        return []
+    owner = document.owner
+    before = {field: getattr(document, field) for field in DIRECT_FIELDS.values()}
+    before["owner_id"] = document.owner_id
     overwrite = action.ai_overwrite_existing
     create_missing = action.ai_create_missing
     updated_fields: list[str] = []
@@ -257,7 +330,37 @@ def apply_ai_suggestions_to_document(
         direct_updated_fields = [
             field for field in updated_fields if field in DIRECT_FIELDS.values()
         ]
-        document.save(update_fields=[*direct_updated_fields, "modified"])
+        if expected_metadata is None:
+            document.save(update_fields=[*direct_updated_fields, "modified"])
+        else:
+            # A conditional metadata write protects edits made after the Qwen
+            # request without wrapping filesystem renames in a later rollback.
+            guard = {field: before[field] for field in direct_updated_fields}
+            guard["owner_id"] = before["owner_id"]
+            updates = {
+                field: getattr(document, field) for field in direct_updated_fields
+            }
+            if not Document.objects.filter(pk=document.pk, **guard).update(
+                **updates,
+                modified=timezone.now(),
+            ):
+                return []
+            document.refresh_from_db()
+            from documents.signals.handlers import update_filename_and_move_files
+
+            update_filename_and_move_files(sender=Document, instance=document)
+            if settings.AUDIT_LOG_ENABLED and direct_updated_fields:
+                from auditlog.models import LogEntry
+
+                LogEntry.objects.log_create(
+                    instance=document,
+                    action=LogEntry.Action.UPDATE,
+                    changes={
+                        field: [str(before[field]), str(getattr(document, field))]
+                        for field in direct_updated_fields
+                    },
+                    additional_data={"reason": "Apply deferred AI suggestions"},
+                )
 
     # Tags at the end so m2m_changed doesn't trigger db and overwrite other changes
     if tags_to_add:

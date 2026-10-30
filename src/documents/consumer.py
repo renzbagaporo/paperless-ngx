@@ -39,6 +39,8 @@ from documents.models import DocumentType
 from documents.models import StoragePath
 from documents.models import Tag
 from documents.models import WorkflowTrigger
+from documents.ocr_index import INGESTION
+from documents.ocr_index import stage_ingestion_index
 from documents.parsers import ParseError
 from documents.permissions import set_permissions_for_object
 from documents.plugins.base import AlwaysRunPluginMixin
@@ -403,6 +405,7 @@ class ConsumerPlugin(
                 exception=e,
             )
 
+    @stage_ingestion_index
     def run(self) -> "ConsumeFileSuccessResult":
         """
         Return the document object if it was successfully created.
@@ -522,6 +525,7 @@ class ConsumerPlugin(
                 date = None
                 thumbnail = None
                 archive_path = None
+                page_source = None
                 page_count = None
 
                 try:
@@ -580,10 +584,26 @@ class ConsumerPlugin(
                             ),
                         )
                     archive_path = document_parser.get_archive_path()
+                    source_getter = getattr(
+                        type(document_parser),
+                        "get_source_rendition",
+                        None,
+                    )
+                    page_source = archive_path or (
+                        self.working_copy
+                        if mime_type == "application/pdf"
+                        else source_getter(document_parser)
+                        if source_getter
+                        else None
+                    )
                     page_count = document_parser.get_page_count(
                         self.working_copy,
                         mime_type,
                     )
+                    if source_getter and page_source and mime_type.startswith("image/"):
+                        from paperless.parsers.utils import get_page_count_for_pdf
+
+                        page_count = get_page_count_for_pdf(page_source, log=self.log)
 
                 except ParseError as e:
                     self._fail(
@@ -700,15 +720,50 @@ class ConsumerPlugin(
                             ingestion_checks,
                         )
 
-                        document_consumption_finished.send(
-                            sender=self.__class__,
-                            document=document,
-                            logging_group=self.logging_group,
-                            classifier=classifier,
-                            original_file=self.unmodified_original
-                            if self.unmodified_original
-                            else self.working_copy,
+                        status_getter = getattr(
+                            type(document_parser),
+                            "get_ocr_status",
+                            None,
                         )
+                        deferred_ingestion = (
+                            document.root_document_id is None
+                            and status_getter is not None
+                            and status_getter(document_parser).get("status")
+                            == "pending"
+                        )
+                        if (
+                            status_getter is not None
+                            and not deferred_ingestion
+                            and document.root_document_id is None
+                        ):
+                            from documents.ocr_status import attach_completed_status
+                            from documents.ocr_status import status_tag
+
+                            attach_completed_status(
+                                document.root_document or document,
+                                status_getter(document_parser)["status"],
+                            )
+                            if ingestion_checks.suspicious_pages:
+                                (document.root_document or document).tags.add(
+                                    status_tag("ocr-review"),
+                                )
+                        if deferred_ingestion:
+                            from documents.signals.handlers import add_inbox_tags
+                            from documents.signals.handlers import add_to_index
+
+                            add_inbox_tags(sender=self.__class__, document=document)
+                            add_to_index(sender=self.__class__, document=document)
+                        else:
+                            document_consumption_finished.send(
+                                sender=self.__class__,
+                                document=document,
+                                logging_group=self.logging_group,
+                                classifier=classifier,
+                                original_file=self.unmodified_original
+                                if self.unmodified_original
+                                else self.working_copy,
+                                skip_ai_index=page_source is not None,
+                            )
 
                         # After everything is in the database, copy the files into
                         # place. If this fails, we'll also rollback the transaction.
@@ -782,27 +837,50 @@ class ConsumerPlugin(
                         document.save()
 
                         # Persist provider evidence before the parser context closes.
-                        if (
-                            document.mime_type == "application/pdf"
-                            or document.has_archive_version
-                        ):
+                        if page_source is not None:
                             from documents.page_data import parser_pages
                             from documents.page_data import save_pages
 
+                            evidence = parser_pages(
+                                document_parser,
+                                page_source,
+                            )
+                            for page in evidence:
+                                page["provenance"][INGESTION] = {
+                                    "root_id": document.root_document_id or document.pk,
+                                    "token": self._index_ingestion_token,
+                                }
+                                page["provenance"]["store_only_current_file"] = bool(
+                                    settings.STORE_ONLY_CURRENT_FILE
+                                    and document.root_document_id is None,
+                                )
+                            if deferred_ingestion:
+                                from documents.deferred_ingestion import capture
+
+                                capture(
+                                    document,
+                                    evidence,
+                                    allow_date=self.metadata.created is None,
+                                )
                             save_pages(
                                 document,
-                                parser_pages(
-                                    document_parser,
-                                    document.archive_path or document.source_path,
-                                ),
+                                evidence,
+                                file_event=bool(document.root_document_id),
+                                automatic_content=text,
+                                index_pending=True,
                             )
 
                         if document.root_document_id:
-                            document_updated.send(
-                                sender=self.__class__,
-                                document=document.root_document,
-                                skip_ai_index=True,  # document_consumption_finished already enqueues the LLM update
+                            from documents.deferred_ingestion import (
+                                suppress_updated_event,
                             )
+
+                            if not suppress_updated_event(document.root_document):
+                                document_updated.send(
+                                    sender=self.__class__,
+                                    document=document.root_document,
+                                    skip_ai_index=True,  # document_consumption_finished already enqueues the LLM update
+                                )
 
                         # Delete the file only if it was successfully consumed
                         self.log.debug(

@@ -56,6 +56,7 @@ from documents.tests.utils import SampleDirMixin
 from paperless.models import ApplicationConfiguration
 from paperless_mail.models import MailAccount
 from paperless_testing.assertions import FileSystemAssertsMixin
+from paperless_testing.auditlog import preserve_auditlog_registry
 from paperless_testing.dirs import DirectoriesMixin
 from paperless_testing.dirs import PaperlessDirs
 from paperless_testing.dirs import paperless_environment
@@ -877,7 +878,12 @@ class TestExportImport(
             self.assertEqual(Document.objects.count(), 4)
             self.assertEqual(CustomFieldInstance.objects.count(), 1)
 
-    def _export_import_barcodes(self, *, split_manifest: bool) -> None:
+    def _export_import_barcodes(
+        self,
+        *,
+        split_manifest: bool,
+        pending_ocr=False,
+    ) -> None:
         shutil.rmtree(Path(self.dirs.media_dir) / "documents")
         shutil.copytree(
             Path(__file__).parent / "samples" / "documents",
@@ -893,7 +899,10 @@ class TestExportImport(
             text="Water notice",
             markdown="# Water notice",
             layout={"items": [{"type": "table", "rows": [["Water", "10"]]}]},
-            provenance={"engine": "llamaparse"},
+            provenance={
+                "engine": "llamaparse",
+                **({"ocr_status": "pending", "reason": "quota"} if pending_ocr else {}),
+            },
             rotation=90,
         )
         expected_page = {
@@ -924,12 +933,24 @@ class TestExportImport(
                 },
                 expected_page,
             )
+            if pending_ocr:
+                from documents.ocr_queue import pending_pages
+
+                self.assertEqual(len(pending_pages(restored.document)), 1)
 
     def test_export_import_barcodes(self) -> None:
         self._export_import_barcodes(split_manifest=False)
 
     def test_export_import_barcodes_split_manifest(self) -> None:
         self._export_import_barcodes(split_manifest=True)
+
+    def test_export_import_preserves_pending_ocr_work(self) -> None:
+        with preserve_auditlog_registry():
+            self._export_import_barcodes(split_manifest=False, pending_ocr=True)
+
+    def test_split_manifest_preserves_pending_ocr_work(self) -> None:
+        with preserve_auditlog_registry():
+            self._export_import_barcodes(split_manifest=True, pending_ocr=True)
 
     def test_folder_prefix(self) -> None:
         """

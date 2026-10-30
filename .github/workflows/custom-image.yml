@@ -51,6 +51,8 @@ jobs:
         with:
           context: .
           file: Dockerfile.custom
+          build-args: |
+            PERSONAL_RELEASE=${{ needs.verify.outputs.tag }}
           push: true
           tags: |
             ${{ needs.verify.outputs.image }}:${{ needs.verify.outputs.tag }}

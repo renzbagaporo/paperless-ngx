@@ -225,6 +225,13 @@ describe('AppFrameComponent', () => {
     expect(fixture.nativeElement.textContent).toContain('Update available')
   })
 
+  it('should show the personal release revision in the footer', () => {
+    settingsService.set(SETTINGS_KEYS.VERSION, '3.3.4-7 (personal)')
+    fixture.detectChanges()
+    expect(component.versionString).toContain('v3.3.4-7 (personal)')
+    expect(fixture.nativeElement.textContent).toContain('v3.3.4-7 (personal)')
+  })
+
   it('should check not for update if disabled', () => {
     const updateCheckSpy = jest.spyOn(remoteVersionService, 'checkForUpdates')
     settingsService.set(SETTINGS_KEYS.UPDATE_CHECKING_ENABLED, false)

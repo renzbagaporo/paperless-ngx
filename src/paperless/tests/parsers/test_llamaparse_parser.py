@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import subprocess
 from typing import TYPE_CHECKING
 from unittest.mock import Mock
 
@@ -31,11 +32,13 @@ def llama_settings(settings):
     settings.REMOTE_OCR_ENGINE = "llamaparse"
     settings.REMOTE_OCR_API_KEY = "fixture-llama-key"
     settings.REMOTE_OCR_ENDPOINT = None
+    settings.OCR_ROTATE_PAGES = False
     return settings
 
 
 @pytest.fixture()
-def llama_parser(paperless_dirs, llama_settings):
+def llama_parser(paperless_dirs, llama_settings, monkeypatch):
+    monkeypatch.setattr("paperless.parsers.llamaparse.time.sleep", lambda _: None)
     with LlamaParseDocumentParser() as parser:
         yield parser
 
@@ -248,13 +251,22 @@ class TestLlamaParseRequests:
             result_for(scan_pdf),
             failed_create=True,
         )
-        with pytest.raises(ParseError, match="HTTP 500"):
-            llama_parser.parse(scan_pdf, "application/pdf")
+        original = scan_pdf.read_bytes()
+        llama_parser.parse(scan_pdf, "application/pdf")
+        status = llama_parser.get_ocr_status()
+        job = status.pop("job")
+        assert job["state"] == "submitting"
+        assert "id" not in job
+        assert status == {
+            "status": "pending",
+            "reason": "server_error",
+        }
+        assert scan_pdf.read_bytes() == original
         assert requests[-1].method == "DELETE"
         assert llama_parser.get_archive_path() is None
 
     @pytest.mark.parametrize("status", ["FAILED", "CANCELLED", "PARTIAL_SUCCESS"])
-    def test_incomplete_job_is_rejected(
+    def test_incomplete_job_defers_without_accepting_partial_text(
         self,
         llama_parser,
         scan_pdf,
@@ -262,8 +274,10 @@ class TestLlamaParseRequests:
         status,
     ):
         requests, _ = self.mock_cloud(monkeypatch, result_for(scan_pdf), status=status)
-        with pytest.raises(ParseError, match="every page"):
-            llama_parser.parse(scan_pdf, "application/pdf")
+        llama_parser.parse(scan_pdf, "application/pdf")
+        assert llama_parser.get_ocr_status()["status"] == "pending"
+        assert llama_parser.get_text() == ""
+        assert llama_parser.get_review_pages() == []
         assert requests[-1].method == "DELETE"
 
     def test_timeout_still_deletes_upload(self, llama_parser, scan_pdf, monkeypatch):
@@ -273,8 +287,8 @@ class TestLlamaParseRequests:
             status="PENDING",
         )
         monkeypatch.setattr("paperless.parsers.llamaparse.JOB_TIMEOUT", -1)
-        with pytest.raises(ParseError, match="deadline"):
-            llama_parser.parse(scan_pdf, "application/pdf")
+        llama_parser.parse(scan_pdf, "application/pdf")
+        assert llama_parser.get_ocr_status()["status"] == "pending"
         assert requests[-1].method == "DELETE"
 
     def test_deletion_failure_is_reported_without_discarding_valid_result(
@@ -446,7 +460,7 @@ class TestLlamaParsePdf:
         "change",
         ["missing", "duplicate", "failed", "dimensions", "missing-text"],
     )
-    def test_invalid_page_results_fail(
+    def test_invalid_page_results_defer_without_installing_bad_text(
         self,
         llama_parser,
         scan_pdf,
@@ -467,7 +481,12 @@ class TestLlamaParsePdf:
             result["markdown"]["pages"] = []
         monkeypatch.setattr(llama_parser, "_request_result", lambda *args: result)
         with pytest.raises(ParseError):
-            llama_parser.parse(scan_pdf, "application/pdf")
+            llama_parser._validated_pages(result, 1)
+        original = scan_pdf.read_bytes()
+        llama_parser.parse(scan_pdf, "application/pdf")
+        assert scan_pdf.read_bytes() == original
+        assert llama_parser.get_ocr_status()["status"] == "pending"
+        assert llama_parser.get_review_pages() == []
         assert llama_parser.get_archive_path() is None
 
     def test_unboxed_text_remains_searchable(self, llama_parser, scan_pdf, monkeypatch):
@@ -478,3 +497,97 @@ class TestLlamaParsePdf:
         monkeypatch.setattr(llama_parser, "_request_result", lambda *args: result)
         llama_parser.parse(scan_pdf, "application/pdf")
         assert "1234" in extract_pdf_text(llama_parser.get_archive_path())
+
+    @pytest.mark.parametrize(
+        "result",
+        [[], {"job": None}, {"text": None}, {"items": {"pages": [None]}}],
+    )
+    def test_malformed_provider_data_keeps_original_pending(
+        self,
+        llama_parser,
+        scan_pdf,
+        monkeypatch,
+        result,
+    ):
+        original = scan_pdf.read_bytes()
+        if isinstance(result, dict) and "job" not in result:
+            result = {"job": {"status": "COMPLETED"}, **result}
+        TestLlamaParseRequests().mock_cloud(monkeypatch, result)
+        llama_parser.parse(scan_pdf, "application/pdf")
+        assert llama_parser.get_ocr_status()["status"] == "pending"
+        assert llama_parser.get_review_pages() == []
+        assert llama_parser.get_archive_path() is None
+        assert scan_pdf.read_bytes() == original
+
+    def test_corrupt_pdf_is_rejected_before_provider_request(
+        self,
+        llama_parser,
+        tmp_path,
+        monkeypatch,
+    ):
+        source = tmp_path / "broken.pdf"
+        source.write_bytes(b"%PDF-invalid")
+        request = Mock()
+        monkeypatch.setattr(llama_parser, "_request_result", request)
+        with pytest.raises(pikepdf.PdfError):
+            llama_parser.parse(source, "application/pdf")
+        request.assert_not_called()
+        assert source.read_bytes() == b"%PDF-invalid"
+
+    @pytest.mark.parametrize(
+        "angle,confidence,expected",
+        [
+            (90, 20, 90),
+            (180, 20, 180),
+            (270, 20, 270),
+            (90, 1, 0),
+            (45, 20, 0),
+            (0, 20, 0),
+        ],
+    )
+    def test_orientation_uses_confident_quarter_turns_without_recompressing_scan(
+        self,
+        llama_parser,
+        scan_pdf,
+        llama_settings,
+        monkeypatch,
+        angle,
+        confidence,
+        expected,
+    ):
+        llama_settings.OCR_ROTATE_PAGES = True
+        llama_settings.OCR_ROTATE_PAGES_THRESHOLD = 12
+        original = scan_pdf.read_bytes()
+        monkeypatch.setattr(
+            "paperless.parsers.llamaparse.subprocess.run",
+            Mock(
+                return_value=subprocess.CompletedProcess(
+                    [],
+                    0,
+                    f"Rotate: {angle}\nOrientation confidence: {confidence}\n",
+                    "",
+                ),
+            ),
+        )
+        output = llama_parser._orient(scan_pdf)
+        with pikepdf.open(scan_pdf) as before, pikepdf.open(output) as after:
+            assert after.pages[0].rotation == expected
+            assert (
+                before.pages[0].images["/Im0"].read_raw_bytes()
+                == after.pages[0].images["/Im0"].read_raw_bytes()
+            )
+        assert scan_pdf.read_bytes() == original
+
+    def test_orientation_failure_preserves_input_and_does_not_block_ocr(
+        self,
+        llama_parser,
+        scan_pdf,
+        llama_settings,
+        monkeypatch,
+    ):
+        llama_settings.OCR_ROTATE_PAGES = True
+        monkeypatch.setattr(
+            "paperless.parsers.llamaparse.subprocess.run",
+            Mock(side_effect=FileNotFoundError("isolated missing tool")),
+        )
+        assert llama_parser._orient(scan_pdf) == scan_pdf

@@ -2,6 +2,7 @@ import enum
 import logging
 from collections.abc import Iterable
 from contextlib import contextmanager
+from contextlib import nullcontext
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -420,6 +421,7 @@ def update_llm_index(
     iter_wrapper: IterWrapper[Document] = identity,
     rebuild=False,
     document_ids: Iterable[int] | None = None,
+    require_completed: bool = False,
 ) -> str:
     """Rebuild or incrementally update the LLM index.
 
@@ -437,6 +439,8 @@ def update_llm_index(
             )
             rebuild = True
         elif migration_result is MigrationCheckResult.DEFERRED:
+            if require_completed:
+                raise RuntimeError("LLM index migration is deferred")
             logger.info(
                 "Skipping LLM index update: migration check deferred while "
                 "index readers are active; will retry next run.",
@@ -511,7 +515,7 @@ def update_llm_index(
     return msg
 
 
-def llm_index_add_or_update_document(document: Document):
+def llm_index_add_or_update_document(document: Document) -> bool:
     """
     Add or atomically replace a document's chunks in the index. Only root
     documents are indexed, so a version is indexed as its root document.
@@ -526,7 +530,11 @@ def llm_index_add_or_update_document(document: Document):
     if new_nodes:
         _embed_nodes(new_nodes, get_embedding_model(config))
 
-    with write_store(embed_model_name=get_configured_model_name(config)) as store:
+    guard = getattr(document, "_personal_index_write_guard", nullcontext)
+    with (
+        guard(),
+        write_store(embed_model_name=get_configured_model_name(config)) as store,
+    ):
         migration_result = _check_and_run_migrations(store)
         if migration_result is MigrationCheckResult.REEMBED_REQUIRED:
             logger.warning(
@@ -535,7 +543,7 @@ def llm_index_add_or_update_document(document: Document):
                 "rebuild' to resolve.",
                 document.id,
             )
-            return
+            return False
         if migration_result is MigrationCheckResult.DEFERRED:
             logger.info(
                 "Skipping incremental LLM index update for document %s: "
@@ -543,8 +551,9 @@ def llm_index_add_or_update_document(document: Document):
                 "will retry on the next write.",
                 document.id,
             )
-            return
+            return False
         store.upsert_document(str(document.id), new_nodes)
+    return True
 
 
 def llm_index_migrate() -> None:

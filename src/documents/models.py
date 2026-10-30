@@ -990,6 +990,26 @@ class Note(SoftDeleteModel):
         return self.note
 
 
+class FileCleanupJob(models.Model):
+    """A committed file revision's durable intent to discard retired bytes."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    root_document_id = models.PositiveIntegerField(null=True)
+    paths = models.JSONField(default=list)
+    version_ids = models.JSONField(default=list)
+    version_identities = models.JSONField(default=dict)
+    created = models.DateTimeField(default=timezone.now)
+    available_at = models.DateTimeField(default=timezone.now, db_index=True)
+    attempts = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ("created", "id")
+        default_permissions = ()
+
+    def __str__(self):
+        return f"File cleanup {self.pk}"
+
+
 class DocumentPage(SoftDeleteModel):
     """Page-local parsing, bound to a document's exact searchable file revision."""
 
