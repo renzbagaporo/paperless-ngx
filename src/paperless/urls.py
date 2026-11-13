@@ -16,6 +16,11 @@ from drf_spectacular.views import SpectacularAPIView
 from drf_spectacular.views import SpectacularSwaggerView
 from rest_framework.routers import DefaultRouter
 
+from documents.scanning_views import ScanJobFileView
+from documents.scanning_views import ScanJobPagesView
+from documents.scanning_views import ScanJobView
+from documents.scanning_views import ScannerListView
+from documents.scanning_views import StartScanView
 from documents.views import BulkDownloadView
 from documents.views import BulkEditObjectsView
 from documents.views import BulkEditView
@@ -218,6 +223,27 @@ urlpatterns = [
                     "^remote_version/",
                     RemoteVersionView.as_view(),
                     name="remoteversion",
+                ),
+                path("scanners/", ScannerListView.as_view(), name="scanners"),
+                re_path(
+                    r"^scanners/(?P<scanner_id>[0-9a-f]{12})/scan/$",
+                    StartScanView.as_view(),
+                    name="scanner_scan",
+                ),
+                re_path(
+                    r"^scan_jobs/(?P<job_id>[0-9a-f]{32})/$",
+                    ScanJobView.as_view(),
+                    name="scan_job",
+                ),
+                re_path(
+                    r"^scan_jobs/(?P<job_id>[0-9a-f]{32})/file/$",
+                    ScanJobFileView.as_view(),
+                    name="scan_job_file",
+                ),
+                re_path(
+                    r"^scan_jobs/(?P<job_id>[0-9a-f]{32})/pages/$",
+                    ScanJobPagesView.as_view(),
+                    name="scan_job_pages",
                 ),
                 re_path(
                     "^ui_settings/",

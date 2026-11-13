@@ -1,0 +1,32 @@
+.scan-preview-large {
+  height: 60vh;
+  background-color: gray;
+
+  pngx-pdf-viewer {
+    width: 100%;
+    height: 100%;
+  }
+}
+
+.scan-thumbnail {
+  width: 96px;
+  height: 136px;
+  background-color: gray;
+  position: relative;
+
+  pngx-pdf-viewer {
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+  }
+
+  .page-number {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+  }
+}
+
+::ng-deep .scan-dialog-preview .pngx-pdf-viewer-container {
+  overflow: hidden !important;
+}

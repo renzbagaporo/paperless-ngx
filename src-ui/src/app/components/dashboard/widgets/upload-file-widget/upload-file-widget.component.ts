@@ -4,10 +4,12 @@ import { RouterModule } from '@angular/router'
 import {
   NgbAlert,
   NgbAlertModule,
+  NgbModal,
   NgbProgressbarModule,
 } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { TourNgBootstrap } from 'ngx-ui-tour-ng-bootstrap'
+import { ScanDialogComponent } from 'src/app/components/common/scan-dialog/scan-dialog.component'
 import { ComponentWithPermissions } from 'src/app/components/with-permissions/with-permissions.component'
 import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
@@ -40,6 +42,7 @@ export class UploadFileWidgetComponent extends ComponentWithPermissions {
   private websocketStatusService = inject(WebsocketStatusService)
   private uploadDocumentsService = inject(UploadDocumentsService)
   settingsService = inject(SettingsService)
+  private modalService = inject(NgbModal)
 
   @ViewChildren(NgbAlert) alerts: QueryList<NgbAlert>
 
@@ -135,6 +138,23 @@ export class UploadFileWidgetComponent extends ComponentWithPermissions {
       const file = files.item(i)
       file && this.uploadDocumentsService.uploadFile(file)
     }
+  }
+
+  readonly scanningEnabled = this.settingsService.getSignal<boolean>(
+    SETTINGS_KEYS.SCANNING_ENABLED
+  )
+
+  public scanDocument() {
+    const modal = this.modalService.open(ScanDialogComponent, {
+      backdrop: 'static',
+      size: 'lg',
+    })
+    modal.componentInstance.title = $localize`Scan a new document`
+    modal.componentInstance.finishCaption = $localize`Add document`
+    modal.result.then(
+      (file: File) => this.uploadDocumentsService.uploadFile(file),
+      () => {}
+    )
   }
 
   get slimSidebarEnabled(): boolean {

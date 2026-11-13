@@ -3,9 +3,9 @@ import {
   DragDropModule,
   moveItemInArray,
 } from '@angular/cdk/drag-drop'
-import { Component, inject, signal } from '@angular/core'
+import { ChangeDetectorRef, Component, inject, signal } from '@angular/core'
 import { FormsModule } from '@angular/forms'
-import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
+import { NgbActiveModal, NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
 import { DocumentService } from 'src/app/services/rest/document.service'
@@ -16,6 +16,7 @@ import {
   PdfRenderMode,
   PngxPdfDocumentProxy,
 } from '../pdf-viewer/pdf-viewer.types'
+import { ScanDialogComponent } from '../scan-dialog/scan-dialog.component'
 import { PdfEditorEditMode } from './pdf-editor-edit-mode'
 
 interface PageOperation {
@@ -44,9 +45,21 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
   private documentService = inject(DocumentService)
   private readonly settingsService = inject(SettingsService)
   activeModal: NgbActiveModal = inject(NgbActiveModal)
+  private modalService = inject(NgbModal)
+  private changeDetector = inject(ChangeDetectorRef)
+  readonly scanningEnabled = this.settingsService.getSignal<boolean>(
+    SETTINGS_KEYS.SCANNING_ENABLED
+  )
 
   readonly documentID = signal<number>(undefined)
   readonly versionID = signal<number>(undefined)
+  /** A PDF to edit instead of a stored document, such as a new scan. */
+  readonly sourceUrl = signal<string>(undefined)
+  /**
+   * Only reorder, rotate and remove pages: no appending, extracting,
+   * splitting or document storage choices.
+   */
+  readonly pagesOnly = signal(false)
 
   pages: PageOperation[] = []
   totalPages = 0
@@ -79,15 +92,34 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
     const input = event.target as HTMLInputElement
     const file = input.files?.[0]
     input.value = ''
-    if (
-      !file ||
-      this.hasSplit() ||
-      this.extractionMode ||
-      !this.buttonsEnabled()
-    )
-      return
+    this.useAppendFile(file)
+  }
+
+  get canAppend(): boolean {
+    return !this.hasSplit() && !this.extractionMode && this.buttonsEnabled()
+  }
+
+  private useAppendFile(file: File | undefined) {
+    if (!file || !this.canAppend) return
     this.appendFile = file
     this.editMode = PdfEditorEditMode.Update
+  }
+
+  scanAppendFile() {
+    if (!this.canAppend) return
+    const modal = this.modalService.open(ScanDialogComponent, {
+      backdrop: 'static',
+      size: 'lg',
+    })
+    modal.componentInstance.title = $localize`Scan pages to append`
+    modal.componentInstance.finishCaption = $localize`Use scan`
+    modal.result.then(
+      (file: File) => {
+        this.useAppendFile(file)
+        this.changeDetector.markForCheck()
+      },
+      () => {}
+    )
   }
 
   removeAppendFile() {
@@ -95,6 +127,9 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
   }
 
   get canSubmit(): boolean {
+    if (this.pagesOnly()) {
+      return this.buttonsEnabled() && this.pages.length > 0
+    }
     if (this.extractionMode) {
       return (
         this.buttonsEnabled() &&
@@ -131,6 +166,7 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
   }
 
   get pdfSrc(): string {
+    if (this.sourceUrl()) return this.sourceUrl()
     return this.documentService.getPreviewUrl(
       this.documentID(),
       false,
@@ -171,7 +207,7 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
   }
 
   toggleSplit(i: number) {
-    if (this.appendFile) return
+    if (this.appendFile || this.pagesOnly()) return
     this.pages[i].splitAfter = !this.pages[i].splitAfter
     if (this.pages[i].splitAfter) {
       // force create mode

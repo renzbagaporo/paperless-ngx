@@ -18,91 +18,112 @@
 </div>
 <div class="modal-body">
   <fieldset [disabled]="!buttonsEnabled()">
-    <div class="border rounded p-3 mb-3">
-      <label class="form-label" for="appendScan" i18n>Append a new scan</label>
-      <input
-        id="appendScan"
-        class="form-control form-control-sm"
-        type="file"
-        accept="application/pdf,image/png,image/jpeg,image/tiff,image/bmp,image/gif,image/webp"
-        (change)="onAppendFileSelected($event)"
-        [disabled]="hasSplit() || !!extractionMode || !buttonsEnabled()"
-      />
-      @if (hasSplit()) {
-        <p class="form-text mb-0" i18n>
-          Remove document splits before appending a scan.
-        </p>
-      } @else if (appendFile) {
-        <div class="d-flex align-items-center gap-2 mt-2">
-          <span class="small">{{ appendFile.name }}</span>
-          <button
-            type="button"
-            class="btn btn-sm btn-outline-secondary"
-            (click)="removeAppendFile()"
-            [disabled]="!buttonsEnabled()"
-            i18n
-          >
-            Remove scan
-          </button>
+    @if (!pagesOnly()) {
+      <div class="border rounded p-3 mb-3">
+        <label class="form-label" for="appendScan" i18n
+          >Append a new scan</label
+        >
+        <div class="d-flex flex-column flex-sm-row gap-2">
+          <input
+            id="appendScan"
+            class="form-control form-control-sm"
+            type="file"
+            accept="application/pdf,image/png,image/jpeg,image/tiff,image/bmp,image/gif,image/webp"
+            (change)="onAppendFileSelected($event)"
+            [disabled]="!canAppend"
+          />
+          @if (scanningEnabled()) {
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-primary text-nowrap"
+              (click)="scanAppendFile()"
+              [disabled]="!canAppend"
+            >
+              <i-bs name="upc-scan" class="me-1"></i-bs
+              ><ng-container i18n>Scan now</ng-container>
+            </button>
+          }
         </div>
-        <p class="form-text" i18n>
-          The scan's pages are added after the edited pages below. Only the new
-          scan is processed with OCR.
-        </p>
-        <label class="form-label small" for="appendOcr" i18n
-          >OCR processing</label
+        @if (hasSplit()) {
+          <p class="form-text mb-0" i18n>
+            Remove document splits before appending a scan.
+          </p>
+        } @else if (appendFile) {
+          <div class="d-flex align-items-center gap-2 mt-2">
+            <span class="small">{{ appendFile.name }}</span>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline-secondary"
+              (click)="removeAppendFile()"
+              [disabled]="!buttonsEnabled()"
+              i18n
+            >
+              Remove scan
+            </button>
+          </div>
+          <p class="form-text" i18n>
+            The scan's pages are added after the edited pages below. Only the
+            new scan is processed with OCR.
+          </p>
+          <label class="form-label small" for="appendOcr" i18n
+            >OCR processing</label
+          >
+          <select
+            id="appendOcr"
+            class="form-select form-select-sm"
+            [(ngModel)]="remoteOcr"
+            [disabled]="!buttonsEnabled()"
+          >
+            <option [ngValue]="false" i18n>Local OCR</option>
+            <option [ngValue]="true" i18n>Configured remote OCR</option>
+          </select>
+        }
+      </div>
+      <div class="border rounded p-3 mb-3">
+        <label class="form-label" for="pageExtraction" i18n
+          >Selected pages</label
         >
         <select
-          id="appendOcr"
-          class="form-select form-select-sm"
-          [(ngModel)]="remoteOcr"
-          [disabled]="!buttonsEnabled()"
+          id="pageExtraction"
+          class="form-select"
+          [(ngModel)]="extractionMode"
+          [disabled]="!!appendFile"
         >
-          <option [ngValue]="false" i18n>Local OCR</option>
-          <option [ngValue]="true" i18n>Configured remote OCR</option>
+          <option [ngValue]="null" i18n>Edit document</option>
+          <option value="extract" i18n>
+            Copy selected pages to a new document
+          </option>
+          <option value="move" i18n>
+            Move selected pages to a new document
+          </option>
         </select>
-      }
-    </div>
-    <div class="border rounded p-3 mb-3">
-      <label class="form-label" for="pageExtraction" i18n>Selected pages</label>
-      <select
-        id="pageExtraction"
-        class="form-select"
-        [(ngModel)]="extractionMode"
-        [disabled]="!!appendFile"
-      >
-        <option [ngValue]="null" i18n>Edit document</option>
-        <option value="extract" i18n>
-          Copy selected pages to a new document
-        </option>
-        <option value="move" i18n>Move selected pages to a new document</option>
-      </select>
-      @if (extractionMode) {
-        <p class="form-text" i18n>
-          The selected pages retain their existing OCR and parsing. No OCR is
-          run.
-        </p>
-        <label class="form-label" for="extractedTitle" i18n
-          >New document title</label
-        >
-        <input
-          id="extractedTitle"
-          class="form-control mb-2"
-          [(ngModel)]="extractedTitle"
-        />
-        <label class="form-label" for="extractedAsn" i18n
-          >New document ASN (optional)</label
-        >
-        <input
-          id="extractedAsn"
-          type="number"
-          min="0"
-          max="4294967295"
-          class="form-control"
-          [(ngModel)]="extractedAsn"
-        />
-      }
-    </div>
+        @if (extractionMode) {
+          <p class="form-text" i18n>
+            The selected pages retain their existing OCR and parsing. No OCR is
+            run.
+          </p>
+          <label class="form-label" for="extractedTitle" i18n
+            >New document title</label
+          >
+          <input
+            id="extractedTitle"
+            class="form-control mb-2"
+            [(ngModel)]="extractedTitle"
+          />
+          <label class="form-label" for="extractedAsn" i18n
+            >New document ASN (optional)</label
+          >
+          <input
+            id="extractedAsn"
+            type="number"
+            min="0"
+            max="4294967295"
+            class="form-control"
+            [(ngModel)]="extractedAsn"
+          />
+        }
+      </div>
+    }
     <div class="btn-toolbar mb-2">
       <div class="btn-group me-3">
         <button
@@ -195,15 +216,17 @@
               >
                 <i-bs name="trash"></i-bs>
               </button>
-              <button
-                class="btn btn-sm btn-dark"
-                (click)="toggleSplit(i); $event.stopPropagation()"
-                [disabled]="!!appendFile"
-                title="Add / remove document split here"
-                i18n-title
-              >
-                <i-bs name="scissors"></i-bs>
-              </button>
+              @if (!pagesOnly()) {
+                <button
+                  class="btn btn-sm btn-dark"
+                  (click)="toggleSplit(i); $event.stopPropagation()"
+                  [disabled]="!!appendFile"
+                  title="Add / remove document split here"
+                  i18n-title
+                >
+                  <i-bs name="scissors"></i-bs>
+                </button>
+              }
             </div>
           </div>
           <div
@@ -258,7 +281,7 @@
   <div
     class="d-flex flex-column flex-md-row flex-wrap w-100 gap-3 align-items-center"
   >
-    @if (!extractionMode) {
+    @if (!extractionMode && !pagesOnly()) {
       <div class="btn-group" role="group">
         <input
           type="radio"
@@ -288,7 +311,9 @@
         </label>
       </div>
     }
-    @if (!extractionMode && editMode === PdfEditorEditMode.Create) {
+    @if (
+      !pagesOnly() && !extractionMode && editMode === PdfEditorEditMode.Create
+    ) {
       <div class="form-group d-flex">
         <div class="form-check">
           <input
@@ -316,8 +341,9 @@
       </div>
     }
     @if (
-      (!extractionMode && editMode === PdfEditorEditMode.Update) ||
-      extractionMode === 'move'
+      !pagesOnly() &&
+      ((!extractionMode && editMode === PdfEditorEditMode.Update) ||
+        extractionMode === 'move')
     ) {
       <div class="form-group">
         <p class="small mb-2" i18n>

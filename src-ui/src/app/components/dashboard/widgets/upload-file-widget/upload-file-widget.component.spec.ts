@@ -3,11 +3,14 @@ import { provideHttpClientTesting } from '@angular/common/http/testing'
 import { ComponentFixture, TestBed } from '@angular/core/testing'
 import { By } from '@angular/platform-browser'
 import { RouterTestingModule } from '@angular/router/testing'
+import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 import { provideUiTour } from 'ngx-ui-tour-ng-bootstrap'
 import { routes } from 'src/app/app-routing.module'
+import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
 import { PermissionsGuard } from 'src/app/guards/permissions.guard'
 import { PermissionsService } from 'src/app/services/permissions.service'
+import { SettingsService } from 'src/app/services/settings.service'
 import { UploadDocumentsService } from 'src/app/services/upload-documents.service'
 import {
   FileStatus,
@@ -67,6 +70,27 @@ describe('UploadFileWidgetComponent', () => {
     component = fixture.componentInstance
 
     fixture.detectChanges()
+  })
+
+  it('offers scanning only when scanners are configured', async () => {
+    expect(fixture.nativeElement.textContent).not.toContain('Scan a document')
+    TestBed.inject(SettingsService).set(SETTINGS_KEYS.SCANNING_ENABLED, true)
+    fixture.detectChanges()
+    expect(fixture.nativeElement.textContent).toContain('Scan a document')
+
+    const file = new File(['%PDF'], 'Scan.pdf', { type: 'application/pdf' })
+    const modal = {
+      componentInstance: {} as any,
+      result: Promise.resolve(file),
+    }
+    jest.spyOn(TestBed.inject(NgbModal), 'open').mockReturnValue(modal as any)
+    const uploadSpy = jest
+      .spyOn(uploadDocumentsService, 'uploadFile')
+      .mockImplementation()
+    component.scanDocument()
+    await Promise.resolve()
+    expect(modal.componentInstance.finishCaption).toBe('Add document')
+    expect(uploadSpy).toHaveBeenCalledWith(file)
   })
 
   it('should support browse files', () => {

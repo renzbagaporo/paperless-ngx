@@ -1,0 +1,224 @@
+<div class="modal-header">
+  <h4 class="modal-title">{{ title }}</h4>
+  <button
+    type="button"
+    class="btn-close"
+    aria-label="Close"
+    i18n-aria-label
+    (click)="cancel()"
+  ></button>
+</div>
+<div class="modal-body">
+  @if (loadingScanners()) {
+    <div class="d-flex align-items-center gap-2">
+      <div class="spinner-border spinner-border-sm" role="status"></div>
+      <span i18n>Looking for scanners…</span>
+    </div>
+  } @else if (availableScanners().length === 0) {
+    <p class="mb-2" i18n>No scanner is available.</p>
+    @for (s of scanners(); track s.id) {
+      <p class="small text-muted mb-1">{{ s.name }}: {{ s.error }}</p>
+    }
+  } @else {
+    <fieldset [disabled]="scanning() || finishing()">
+      @if (availableScanners().length > 1) {
+        <label class="form-label" for="scanScanner" i18n>Scanner</label>
+        <select
+          id="scanScanner"
+          class="form-select mb-3"
+          [ngModel]="scanner()"
+          (ngModelChange)="selectScanner($event)"
+        >
+          @for (s of availableScanners(); track s.id) {
+            <option [ngValue]="s">{{ s.name }}</option>
+          }
+        </select>
+      } @else {
+        <p class="mb-3">
+          <i-bs name="printer" class="me-1"></i-bs>{{ scanner()?.name }}
+        </p>
+      }
+      <div class="row g-3">
+        <div class="col-md-6">
+          <label class="form-label" for="scanSource" i18n>Source</label>
+          <select
+            id="scanSource"
+            class="form-select"
+            [ngModel]="source()"
+            (ngModelChange)="selectSource($event)"
+          >
+            @for (s of scanner()?.sources ?? []; track s.id) {
+              <option [ngValue]="s">{{ SOURCE_LABELS[s.id] }}</option>
+            }
+          </select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="scanColor" i18n>Color</label>
+          <select
+            id="scanColor"
+            class="form-select"
+            [ngModel]="colorMode()"
+            (ngModelChange)="colorMode.set($event)"
+          >
+            @for (m of source()?.color_modes ?? []; track m) {
+              <option [ngValue]="m">{{ COLOR_MODE_LABELS[m] }}</option>
+            }
+          </select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="scanResolution" i18n>Resolution</label>
+          <select
+            id="scanResolution"
+            class="form-select"
+            [ngModel]="resolution()"
+            (ngModelChange)="resolution.set($event)"
+          >
+            @for (r of source()?.resolutions ?? []; track r) {
+              <option [ngValue]="r">{{ r }} dpi</option>
+            }
+          </select>
+        </div>
+        <div class="col-md-6">
+          <label class="form-label" for="scanPaper" i18n>Paper size</label>
+          <select
+            id="scanPaper"
+            class="form-select"
+            [ngModel]="paperSize()"
+            (ngModelChange)="paperSize.set($event)"
+          >
+            @for (p of paperSizes; track p) {
+              <option [ngValue]="p">{{ PAPER_SIZE_LABELS[p] }}</option>
+            }
+          </select>
+        </div>
+        @if (isFeeder()) {
+          <div class="col-md-6">
+            <label class="form-label" for="scanLimit" i18n>Pages</label>
+            <select
+              id="scanLimit"
+              class="form-select"
+              [ngModel]="limitSheets()"
+              (ngModelChange)="limitSheets.set($event)"
+            >
+              <option [ngValue]="false" i18n>Until the feeder is empty</option>
+              <option [ngValue]="true" i18n>A set number of sheets</option>
+            </select>
+          </div>
+          @if (limitSheets()) {
+            <div class="col-md-6">
+              <label class="form-label" for="scanSheets" i18n>Sheets</label>
+              <input
+                id="scanSheets"
+                type="number"
+                min="1"
+                max="500"
+                class="form-control"
+                [ngModel]="maxSheets()"
+                (ngModelChange)="maxSheets.set($event)"
+              />
+            </div>
+          }
+        }
+      </div>
+    </fieldset>
+  }
+
+  @if (scanning()) {
+    <div class="d-flex align-items-center gap-2 mt-3" role="status">
+      <div class="spinner-border spinner-border-sm"></div>
+      <span i18n
+        >Scanning… {{ job().pages }} page(s) received in this pass.</span
+      >
+    </div>
+  }
+  @if (finishedJob() && !scanning()) {
+    <div class="alert alert-success mt-3 mb-2" role="status">
+      <ng-container i18n
+        >{{ finishedJob().pages }} page(s) scanned. Load more pages and scan
+        again to add them, or finish.</ng-container
+      >
+    </div>
+  }
+  @if (previewSrc()) {
+    <div class="scan-dialog-preview mt-2">
+      <div class="d-flex justify-content-end mb-2">
+        <button
+          type="button"
+          class="btn btn-sm btn-outline-secondary"
+          (click)="editPages()"
+          [disabled]="scanning() || finishing()"
+        >
+          <i-bs name="pencil" class="me-1"></i-bs
+          ><ng-container i18n>Edit pages</ng-container>
+        </button>
+      </div>
+      @if (previewPage()) {
+        <div class="scan-preview-large rounded mb-2">
+          <pngx-pdf-viewer
+            [src]="previewSrc()"
+            [page]="previewPage()"
+            [renderMode]="PdfRenderMode.Single"
+            [selectable]="false"
+          ></pngx-pdf-viewer>
+        </div>
+      }
+      <div class="d-flex flex-wrap gap-2">
+        @for (p of previewPages(); track p) {
+          <button
+            type="button"
+            class="scan-thumbnail btn p-0 border rounded overflow-hidden"
+            [class.border-primary]="previewPage() === p"
+            [class.border-3]="previewPage() === p"
+            (click)="togglePreview(p)"
+            title="Show page {{ p }}"
+            i18n-title
+          >
+            <pngx-pdf-viewer
+              [src]="previewSrc()"
+              [page]="p"
+              [renderMode]="PdfRenderMode.Single"
+              [selectable]="false"
+            ></pngx-pdf-viewer>
+            <span class="page-number badge text-bg-dark">{{ p }}</span>
+          </button>
+        }
+      </div>
+    </div>
+  }
+  @if (error()) {
+    <div class="alert alert-danger mt-3 mb-0" role="alert">{{ error() }}</div>
+  }
+</div>
+<div class="modal-footer">
+  <button type="button" class="btn btn-outline-secondary" (click)="cancel()">
+    <ng-container i18n>Cancel</ng-container>
+  </button>
+  <button
+    type="button"
+    class="btn"
+    [class.btn-primary]="!finishedJob()"
+    [class.btn-outline-primary]="!!finishedJob()"
+    (click)="scan()"
+    [disabled]="!canScan()"
+  >
+    <i-bs name="upc-scan" class="me-1"></i-bs>
+    @if (finishedJob()) {
+      <ng-container i18n>Scan more pages</ng-container>
+    } @else {
+      <ng-container i18n>Scan</ng-container>
+    }
+  </button>
+  @if (finishedJob()) {
+    <button
+      type="button"
+      class="btn btn-primary"
+      (click)="finish()"
+      [disabled]="scanning() || finishing()"
+    >
+      @if (finishing()) {
+        <div class="spinner-border spinner-border-sm me-1" role="status"></div>
+      }
+      {{ finishCaption }}
+    </button>
+  }
+</div>

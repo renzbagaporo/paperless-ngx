@@ -1,7 +1,7 @@
 import { provideHttpClient, withInterceptorsFromDi } from '@angular/common/http'
 import { provideHttpClientTesting } from '@angular/common/http/testing'
 import { ComponentFixture, TestBed } from '@angular/core/testing'
-import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
+import { NgbActiveModal, NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
 import { DocumentService } from 'src/app/services/rest/document.service'
 import { PdfEditorEditMode } from './pdf-editor-edit-mode'
@@ -30,6 +30,48 @@ describe('PDFEditorComponent', () => {
     expect(component.appendFile).toBeNull()
     component.deselectAll()
     expect(component.canSubmit).toBe(false)
+  })
+
+  it('appends a scan from a network scanner', async () => {
+    const file = new File(['%PDF'], 'Scan.pdf', { type: 'application/pdf' })
+    const modalService = TestBed.inject(NgbModal)
+    const open = jest.spyOn(modalService, 'open').mockReturnValue({
+      componentInstance: {},
+      result: Promise.resolve(file),
+    } as any)
+    component.scanAppendFile()
+    await Promise.resolve()
+    expect(open).toHaveBeenCalled()
+    expect(component.appendFile).toBe(file)
+    expect(component.editMode).toBe(PdfEditorEditMode.Update)
+
+    component.appendFile = null
+    component.extractionMode = 'extract'
+    open.mockClear()
+    component.scanAppendFile()
+    expect(open).not.toHaveBeenCalled()
+  })
+
+  it('edits only pages of a given PDF in pages-only mode', () => {
+    component.sourceUrl.set('/api/scan_jobs/abc/file/?revision=0')
+    component.pagesOnly.set(true)
+    fixture.detectChanges()
+    expect(component.pdfSrc).toBe('/api/scan_jobs/abc/file/?revision=0')
+    component.pages = [
+      { page: 1, rotate: 0, splitAfter: false },
+      { page: 2, rotate: 0, splitAfter: false },
+    ]
+    component.toggleSplit(0)
+    expect(component.hasSplit()).toBe(false)
+    component.rotate(1)
+    component.remove(0)
+    expect(component.canSubmit).toBe(true)
+    expect(component.getOperations()).toEqual([{ page: 2, rotate: 90, doc: 0 }])
+    component.remove(0)
+    expect(component.canSubmit).toBe(false)
+    const text = fixture.nativeElement.textContent
+    expect(text).not.toContain('Append a new scan')
+    expect(text).not.toContain('Update this document')
   })
 
   it('prevents moving all pages and requires confirmation to discard history', () => {

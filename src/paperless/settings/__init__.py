@@ -1216,6 +1216,12 @@ REMOTE_OCR_ALLOW_INTERNAL_ENDPOINTS = get_bool_from_env(
     "true",
 )
 
+###############################################################################
+# Scanning from the web UI                                                    #
+###############################################################################
+# eSCL (AirScan) base URLs, such as an AirSane device URL.
+SCANNERS = get_list_from_env("PAPERLESS_SCANNERS", default=[])
+
 ################################################################################
 # AI Settings                                                                  #
 ################################################################################

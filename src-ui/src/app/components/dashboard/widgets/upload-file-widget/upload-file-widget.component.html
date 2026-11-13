@@ -7,6 +7,12 @@
         <div class="text-muted smaller fst-italic" i18n>or drop files anywhere</div>
       </button>
       <input type="file" class="visually-hidden" (change)="onFileSelected($event)" multiple #fileUpload>
+      @if (scanningEnabled()) {
+        <button type="button" class="btn btn-sm btn-outline-primary bg-light shadow-sm w-100 mt-2" (click)="scanDocument()">
+          <i-bs class="me-1" name="upc-scan"></i-bs>
+          <span i18n>Scan a document</span>
+        </button>
+      }
     </form>
     @if (getStatus().length > 0) {
     <div class="fixed-bottom p-2 p-md-4 d-flex justify-content-end pe-none consumer-status-list" [ngClass]="slimSidebarEnabled ? 'col-slim' : 'offset-sidebar-expanded'">

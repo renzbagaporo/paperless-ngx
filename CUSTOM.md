@@ -166,6 +166,39 @@ These checks are off by default. Appending preserves the collection's title
 and date; review notes identify page numbers after the retained pages. The
 cross-page comparison requires LlamaParse's plain and formatted OCR results.
 
+## Scanning from the web UI
+
+Paperless can scan from network scanners that speak eSCL (AirScan), including
+USB scanners shared by an [AirSane](https://github.com/SimulPiscator/AirSane)
+server. List the scanners or AirSane servers, separated by commas:
+
+```dotenv
+PAPERLESS_SCANNERS=http://airsane-escl.example:8090/
+```
+
+An AirSane server URL brings in every scanner on its index page, including
+scanners it publishes later. Any other URL is used as a single eSCL scanner,
+such as `http://192.0.2.10/eSCL/`. The Paperless server makes the connection,
+so it must be able to reach the scanner; the browser need not.
+
+When scanners are configured, the dashboard upload widget offers **Scan a
+document**, and the PDF Editor offers **Scan now** next to **Append a new
+scan**. The dialog lists each scanner's own sources, color modes and
+resolutions, and remembers the last choices in the browser. A feeder scan runs
+until the feeder is empty, or stops after a set number of sheets; a duplex
+sheet gives two pages. Thumbnails of the scanned pages appear after each scan,
+and clicking one shows it enlarged. **Edit pages** opens the PDF Editor on the
+scan to reorder, rotate or remove pages before it is used. **Scan more pages** adds another flatbed
+page or feeder batch, from the same or another scanner, to the same PDF. Finishing a new-document scan uploads it
+like any other file, so workflows, OCR and remote OCR apply as usual.
+Finishing a PDF Editor scan selects it as the scan to append.
+
+Scanning needs permission to add or change documents. A scan runs in the web
+server process and holds its scanner until it finishes; another scan on the
+same scanner is refused meanwhile. Unfinished scans are stored under
+`PAPERLESS_SCRATCH_DIR/web_scans`, are private to the user who started them,
+and are removed after an hour.
+
 ## Storage
 
 The explicit **keep only current file** mode discards superseded versions and

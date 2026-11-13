@@ -116,6 +116,7 @@ export const SETTINGS_KEYS = {
   GMAIL_OAUTH_URL: 'gmail_oauth_url',
   OUTLOOK_OAUTH_URL: 'outlook_oauth_url',
   EMAIL_ENABLED: 'email_enabled',
+  SCANNING_ENABLED: 'scanning_enabled',
   AI_ENABLED: 'ai_enabled',
   REMOTE_OCR_CONFIGURED: 'remote_ocr:configured',
   REMOTE_OCR_MODE: 'remote_ocr:mode',
@@ -371,6 +372,11 @@ export const SETTINGS: UiSetting[] = [
   },
   {
     key: SETTINGS_KEYS.EMAIL_ENABLED,
+    type: 'boolean',
+    default: false,
+  },
+  {
+    key: SETTINGS_KEYS.SCANNING_ENABLED,
     type: 'boolean',
     default: false,
   },

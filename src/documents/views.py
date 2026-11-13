@@ -4543,6 +4543,8 @@ class UiSettingsView(GenericAPIView[Any]):
 
         ui_settings["email_enabled"] = settings.EMAIL_ENABLED
 
+        ui_settings["scanning_enabled"] = bool(settings.SCANNERS)
+
         ai_config = AIConfig()
 
         ui_settings["ai_enabled"] = ai_config.ai_enabled

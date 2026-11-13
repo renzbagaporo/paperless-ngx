@@ -32,6 +32,7 @@ class TestApiUiSettings(DirectoriesMixin, APITestCase):
         EMAIL_ENABLED=False,
         GMAIL_OAUTH_ENABLED=False,
         OUTLOOK_OAUTH_ENABLED=False,
+        SCANNERS=[],
     )
     def test_api_get_ui_settings(self) -> None:
         response = self.client.get(self.ENDPOINT, format="json")
@@ -61,6 +62,7 @@ class TestApiUiSettings(DirectoriesMixin, APITestCase):
                     "backend_setting": "default",
                 },
                 "email_enabled": False,
+                "scanning_enabled": False,
                 "ai_enabled": False,
                 "remote_ocr": {
                     "configured": False,
