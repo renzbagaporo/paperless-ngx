@@ -184,9 +184,12 @@ so it must be able to reach the scanner; the browser need not.
 When scanners are configured, the dashboard upload widget offers **Scan a
 document**, and the PDF Editor offers **Scan now** next to **Append a new
 scan**. The dialog lists each scanner's own sources, color modes and
-resolutions, and remembers the last choices in the browser. A feeder scan runs
-until the feeder is empty, or stops after a set number of sheets; a duplex
-sheet gives two pages. Thumbnails of the scanned pages appear after each scan,
+resolutions up to 600 dpi, and remembers the last choices in the browser.
+Pages are requested as JPEG when the scanner offers it, since AirSane's PDF
+pages hold uncompressed images, and each page is written to disk as it
+arrives. A feeder scan runs until the feeder is empty, or stops after a set
+number of sheets; a duplex sheet gives two pages. A batch the scanner breaks
+off, such as at a jam, is reported as failed rather than kept short. Thumbnails of the scanned pages appear after each scan,
 and clicking one shows it enlarged. **Edit pages** opens the PDF Editor on the
 scan to reorder, rotate or remove pages before it is used. **Scan more pages** adds another flatbed
 page or feeder batch, from the same or another scanner, to the same PDF. Finishing a new-document scan uploads it

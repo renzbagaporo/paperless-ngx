@@ -12,7 +12,6 @@ ingestion, permissions and OCR follow the same paths as an uploaded file.
 from __future__ import annotations
 
 import hashlib
-import io
 import json
 import logging
 import re
@@ -20,6 +19,7 @@ import shutil
 import threading
 import time
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,7 +49,12 @@ DEVICE_PATH_RE = re.compile(
     r"^/(?:[^/]+/)*[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}/?$",
 )
 JOB_EXPIRY_SECONDS = 60 * 60
+# Higher resolutions make pages too large to process on a small server.
+MAX_RESOLUTION = 600
 CAPABILITIES_CACHE_SECONDS = 5 * 60
+UNREACHABLE_CACHE_SECONDS = 30
+# Resolutions offered when a scanner gives only a range.
+COMMON_RESOLUTIONS = (75, 100, 150, 200, 300, 400, 600)
 CONNECT_TIMEOUT = 5.0
 # A page is delivered only after the scanner finishes it.
 PAGE_TIMEOUT = 180.0
@@ -122,6 +127,8 @@ def _device_urls(server_url: str) -> list[str] | None:
     devices = cache.get(cache_key)
     if devices is not None:
         return devices
+    if cache.get(cache_key + "-down"):
+        return None
     try:
         with _client() as client:
             response = client.get(
@@ -130,6 +137,8 @@ def _device_urls(server_url: str) -> list[str] | None:
             )
     except httpx.HTTPError as e:
         logger.warning("Scanner server %s is unavailable: %s", server_url, e)
+        # Spare later requests the connection timeout for a while.
+        cache.set(cache_key + "-down", 1, UNREACHABLE_CACHE_SECONDS)
         return None
     devices = []
     if response.status_code == 200 and "html" in response.headers.get(
@@ -179,10 +188,27 @@ def _client() -> httpx.Client:
     )
 
 
+def _int(text: str | None) -> int | None:
+    try:
+        return int(float(text or ""))
+    except (ValueError, OverflowError):
+        return None
+
+
 def _ints(element: ET.Element, path: str) -> list[int]:
-    return sorted(
-        {int(e.text) for e in element.findall(path, NS) if e.text and e.text.isdigit()},
-    )
+    values = (_int(e.text) for e in element.findall(path, NS))
+    return sorted({v for v in values if v is not None})
+
+
+def _resolutions(caps: ET.Element) -> list[int]:
+    resolutions = _ints(caps, ".//scan:DiscreteResolution/scan:XResolution")
+    if not resolutions:
+        for range_ in caps.findall(".//scan:XResolutionRange", NS):
+            low = _int(range_.findtext("scan:Min", None, NS))
+            high = _int(range_.findtext("scan:Max", None, NS))
+            if low is not None and high is not None:
+                resolutions += [r for r in COMMON_RESOLUTIONS if low <= r <= high]
+    return sorted({r for r in resolutions if r <= MAX_RESOLUTION})
 
 
 def parse_capabilities(xml: bytes) -> dict[str, Any]:
@@ -198,20 +224,20 @@ def parse_capabilities(xml: bytes) -> dict[str, Any]:
         if caps is None:
             continue
         color_modes = {e.text for e in caps.findall(".//scan:ColorMode", NS) if e.text}
-        formats = {e.text for e in caps.findall(".//pwg:DocumentFormat", NS)} | {
-            e.text for e in caps.findall(".//scan:DocumentFormatExt", NS)
+        formats = {
+            e.text
+            for e in caps.findall(".//pwg:DocumentFormat", NS)
+            + caps.findall(".//scan:DocumentFormatExt", NS)
+            if e.text
         }
         sources.append(
             {
                 "id": source_id,
                 "color_modes": [m for m, v in COLOR_MODES.items() if v in color_modes],
-                "resolutions": _ints(
-                    caps,
-                    ".//scan:DiscreteResolution/scan:XResolution",
-                ),
-                "max_width": int(caps.findtext("scan:MaxWidth", "0", NS) or 0),
-                "max_height": int(caps.findtext("scan:MaxHeight", "0", NS) or 0),
-                "pdf": "application/pdf" in formats,
+                "resolutions": _resolutions(caps),
+                "max_width": _int(caps.findtext("scan:MaxWidth", None, NS)) or 0,
+                "max_height": _int(caps.findtext("scan:MaxHeight", None, NS)) or 0,
+                "formats": sorted(formats),
             },
         )
     return {
@@ -266,6 +292,16 @@ def describe_scanners() -> list[dict[str, Any]]:
     return result
 
 
+def _document_format(color_mode: str, formats: list[str]) -> str:
+    # JPEG pages are small and embed in a PDF as they are; AirSane's own PDF
+    # output holds the raw, uncompressed image. JPEG cannot hold 1-bit images.
+    if color_mode == "bw":
+        preferred = ("image/png", "application/pdf", "image/jpeg")
+    else:
+        preferred = ("image/jpeg", "application/pdf", "image/png")
+    return next((f for f in preferred if f in formats), "image/jpeg")
+
+
 def build_scan_settings(options: ScanOptions, source_caps: dict[str, Any]) -> bytes:
     width, height = PAPER_SIZES[options.paper_size]
     if source_caps["max_width"]:
@@ -273,7 +309,7 @@ def build_scan_settings(options: ScanOptions, source_caps: dict[str, Any]) -> by
     if source_caps["max_height"]:
         height = min(height, source_caps["max_height"])
     _, input_source, duplex = SOURCES[options.source]
-    document_format = "application/pdf" if source_caps["pdf"] else "image/jpeg"
+    document_format = _document_format(options.color_mode, source_caps["formats"])
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <scan:ScanSettings xmlns:scan="{NS["scan"]}" xmlns:pwg="{NS["pwg"]}">
   <pwg:Version>2.0</pwg:Version>
@@ -526,6 +562,8 @@ def _run_job(
             pages = _merge(parts, job_dir / "scan.pdf", previous)
         except FileNotFoundError as e:
             raise ScanError("The earlier scan is no longer available.") from e
+        for part in parts:
+            part.unlink(missing_ok=True)
         state.update(status="done", pages=pages)
         _write_state(job_dir, state)
         if previous is not None:
@@ -555,8 +593,9 @@ def _scan(
     source_caps: dict[str, Any],
     job_dir: Path,
     state: dict[str, Any],
-) -> list[tuple[str, bytes]]:
-    parts: list[tuple[str, bytes]] = []
+) -> list[Path]:
+    """Scan into the job folder, one PDF file per delivered document."""
+    parts: list[Path] = []
     page_limit = options.page_limit()
     with _client() as client:
         try:
@@ -580,34 +619,115 @@ def _scan(
             if (job_dir / "cancel").exists():
                 _cancel_remote(client, job_url)
                 return parts
+            download = job_dir / f"page-{len(parts) + 1:04d}.download"
             try:
-                response = client.get(urljoin(job_url, "NextDocument"))
+                status_code, content_type = _receive_page(
+                    client,
+                    urljoin(job_url, "NextDocument"),
+                    download,
+                )
             except httpx.HTTPError as e:
                 _cancel_remote(client, job_url)
                 raise ScanError("The connection to the scanner was lost.") from e
-            if response.status_code == 404:
+            if status_code == 404:
+                if parts:
+                    _check_job_completed(client, scanner, job_url, state["pages"])
                 break
-            if response.status_code == 503 and not_ready < NOT_READY_LIMIT:
+            if status_code == 503 and not_ready < NOT_READY_LIMIT:
                 not_ready += 1
                 time.sleep(1)
                 continue
-            if response.status_code != 200:
+            if status_code != 200:
                 _cancel_remote(client, job_url)
-                if not parts and response.status_code in (409, 503):
+                if not parts and status_code in (409, 503):
                     raise ScanError("Load the pages into the scanner and try again.")
                 raise ScanError(
-                    f"The scanner stopped with an error (HTTP {response.status_code}).",
+                    f"The scanner stopped with an error (HTTP {status_code}).",
                 )
             not_ready = 0
-            content_type = response.headers.get("Content-Type", "").split(";")[0]
-            parts.append((content_type.strip().lower(), response.content))
-            state["pages"] = len(parts)
+            part, part_pages = _page_pdf(download, content_type, options.resolution)
+            parts.append(part)
+            # A document may hold several pages.
+            state["pages"] += part_pages
             _write_state(job_dir, state)
-            if page_limit is not None and len(parts) >= page_limit:
+            if page_limit is not None and state["pages"] >= page_limit:
                 # Cancelling stops the feeder; the remaining sheets stay put.
                 _cancel_remote(client, job_url)
                 break
     return parts
+
+
+def _receive_page(
+    client: httpx.Client,
+    url: str,
+    path: Path,
+) -> tuple[int, str]:
+    """Write a delivered page to ``path`` without holding it in memory."""
+    with client.stream("GET", url) as response:
+        if response.status_code != 200:
+            return response.status_code, ""
+        with path.open("wb") as f:
+            for chunk in response.iter_bytes():
+                f.write(chunk)
+        content_type = response.headers.get("Content-Type", "").split(";")[0]
+        return 200, content_type.strip().lower()
+
+
+def _page_pdf(download: Path, content_type: str, resolution: int) -> tuple[Path, int]:
+    """Turn a delivered document into a PDF file beside it; return its pages."""
+    output = download.with_suffix(".pdf")
+    with download.open("rb") as f:
+        is_pdf = content_type == "application/pdf" or f.read(4) == b"%PDF"
+    if is_pdf:
+        download.replace(output)
+    else:
+        # Lay the image out at the scan resolution, whatever its header says.
+        with output.open("wb") as f:
+            img2pdf.convert(
+                str(download),
+                outputstream=f,
+                layout_fun=img2pdf.get_fixed_dpi_layout_fun((resolution, resolution)),
+            )
+        download.unlink()
+    with pikepdf.Pdf.open(output) as pdf:
+        return output, len(pdf.pages)
+
+
+def _check_job_completed(
+    client: httpx.Client,
+    scanner: ScannerConfig,
+    job_url: str,
+    pages: int,
+) -> None:
+    """
+    A scanner ends every job with 404 on NextDocument, whether the feeder ran
+    empty or the job broke off. The job's state in ScannerStatus tells which.
+    A scanner that does not list the job is trusted.
+    """
+    try:
+        response = client.get(
+            urljoin(scanner.url, "ScannerStatus"),
+            timeout=httpx.Timeout(15.0, connect=CONNECT_TIMEOUT),
+        )
+        response.raise_for_status()
+        root = ET.fromstring(response.content)
+    except (httpx.HTTPError, ET.ParseError):
+        logger.warning("Could not read the final state of scan job %s", job_url)
+        return
+    job_id = job_url.rstrip("/").rsplit("/", 1)[-1]
+    for info in root.iterfind("scan:Jobs/scan:JobInfo", NS):
+        uri = info.findtext("pwg:JobUri", "", NS).strip().rstrip("/")
+        if uri.rsplit("/", 1)[-1] != job_id:
+            continue
+        job_state = info.findtext("pwg:JobState", "", NS).strip()
+        if job_state and job_state != "Completed":
+            reason = info.findtext(".//pwg:JobStateReason", "", NS).strip()
+            raise ScanError(
+                f"The scanner stopped after {pages} page(s) without finishing "
+                f"({job_state}{': ' + reason if reason else ''}). Check the "
+                "scanner for a jam or error, then scan again.",
+            )
+        return
 
 
 def _cancel_remote(client: httpx.Client, job_url: str) -> None:
@@ -618,18 +738,13 @@ def _cancel_remote(client: httpx.Client, job_url: str) -> None:
 
 
 def _merge(
-    parts: list[tuple[str, bytes]],
+    parts: list[Path],
     output: Path,
     previous: Path | None = None,
 ) -> int:
-    with pikepdf.Pdf.new() as merged:
-        if previous is not None:
-            merged.pages.extend(pikepdf.Pdf.open(previous).pages)
-        for content_type, data in parts:
-            if content_type == "application/pdf" or data.startswith(b"%PDF"):
-                source = pikepdf.Pdf.open(io.BytesIO(data))
-            else:
-                source = pikepdf.Pdf.open(io.BytesIO(img2pdf.convert(data)))
-            merged.pages.extend(source.pages)
+    sources = ([previous] if previous is not None else []) + parts
+    with ExitStack() as stack, pikepdf.Pdf.new() as merged:
+        for path in sources:
+            merged.pages.extend(stack.enter_context(pikepdf.Pdf.open(path)).pages)
         merged.save(output)
         return len(merged.pages)

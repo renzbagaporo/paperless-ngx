@@ -109,6 +109,8 @@ export class PDFEditorComponent extends ConfirmDialogComponent {
     if (!this.canAppend) return
     const modal = this.modalService.open(ScanDialogComponent, {
       backdrop: 'static',
+      // Escape would close the dialog with its scan still running.
+      keyboard: false,
       size: 'lg',
     })
     modal.componentInstance.title = $localize`Scan pages to append`

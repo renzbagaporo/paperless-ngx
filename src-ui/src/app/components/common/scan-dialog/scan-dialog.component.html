@@ -173,12 +173,16 @@
             title="Show page {{ p }}"
             i18n-title
           >
-            <pngx-pdf-viewer
-              [src]="previewSrc()"
-              [page]="p"
-              [renderMode]="PdfRenderMode.Single"
-              [selectable]="false"
-            ></pngx-pdf-viewer>
+            @defer (on viewport) {
+              <pngx-pdf-viewer
+                [src]="previewSrc()"
+                [page]="p"
+                [renderMode]="PdfRenderMode.Single"
+                [selectable]="false"
+              ></pngx-pdf-viewer>
+            } @placeholder {
+              <div class="w-100 h-100"></div>
+            }
             <span class="page-number badge text-bg-dark">{{ p }}</span>
           </button>
         }

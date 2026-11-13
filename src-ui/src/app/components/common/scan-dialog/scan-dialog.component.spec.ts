@@ -1,8 +1,12 @@
 import { EventEmitter, signal } from '@angular/core'
-import { ComponentFixture, TestBed } from '@angular/core/testing'
+import {
+  ComponentFixture,
+  DeferBlockState,
+  TestBed,
+} from '@angular/core/testing'
 import { NgbActiveModal, NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule, allIcons } from 'ngx-bootstrap-icons'
-import { of, throwError } from 'rxjs'
+import { Subject, of, throwError } from 'rxjs'
 import {
   ScanJob,
   Scanner,
@@ -23,7 +27,7 @@ const FEEDER: Scanner = {
       resolutions: [150, 300, 600],
       max_width: 2550,
       max_height: 4650,
-      pdf: true,
+      formats: ['application/pdf', 'image/jpeg'],
     },
     {
       id: 'feeder_duplex',
@@ -31,7 +35,7 @@ const FEEDER: Scanner = {
       resolutions: [200, 600],
       max_width: 2550,
       max_height: 4650,
-      pdf: true,
+      formats: ['application/pdf', 'image/jpeg'],
     },
   ],
 }
@@ -49,7 +53,7 @@ const FLATBED: Scanner = {
       resolutions: [75, 150],
       max_width: 2550,
       max_height: 3508,
-      pdf: false,
+      formats: ['image/jpeg'],
     },
   ],
 }
@@ -224,10 +228,47 @@ describe('ScanDialogComponent', () => {
     expect(component.error()).toBe('Load the pages into the document feeder.')
   })
 
+  it('keeps polling through dropped requests', () => {
+    create()
+    scannerService.startScan.mockReturnValue(of(job({})))
+    scannerService.getJob
+      .mockReturnValueOnce(throwError(() => ({ status: 502, error: {} })))
+      .mockReturnValueOnce(throwError(() => ({ status: 0, error: {} })))
+      .mockReturnValueOnce(of(job({ status: 'done', pages: 4 })))
+    component.scan()
+    jest.advanceTimersByTime(2000)
+    expect(component.scanning()).toBe(true)
+    expect(component.error()).toBeNull()
+    jest.advanceTimersByTime(1000)
+    expect(component.finishedJob().pages).toBe(4)
+  })
+
+  it('cancels a scan that was still starting when the dialog closed', () => {
+    create()
+    const started = new Subject<ScanJob>()
+    scannerService.startScan.mockReturnValue(started)
+    component.scan()
+    component.cancel()
+    expect(scannerService.deleteJob).not.toHaveBeenCalled()
+    started.next(job({ id: 'late' }))
+    expect(scannerService.deleteJob).toHaveBeenCalledWith('late')
+    jest.advanceTimersByTime(3000)
+    expect(scannerService.getJob).not.toHaveBeenCalled()
+  })
+
+  it('discards server-side jobs when the dialog is destroyed', () => {
+    create()
+    component.finishedJob.set(job({ id: 'j1', status: 'done' }))
+    fixture.destroy()
+    expect(scannerService.deleteJob).toHaveBeenCalledWith('j1')
+  })
+
   it('reports a lost scan and a failed download', () => {
     create()
     scannerService.startScan.mockReturnValue(of(job({})))
-    scannerService.getJob.mockReturnValue(throwError(() => ({ error: {} })))
+    scannerService.getJob.mockReturnValue(
+      throwError(() => ({ status: 404, error: {} }))
+    )
     component.scan()
     jest.advanceTimersByTime(1000)
     expect(component.error()).toBe('The scan was lost.')
@@ -279,7 +320,7 @@ describe('ScanDialogComponent', () => {
     expect(component.maxSheets()).toBe(2)
   })
 
-  it('previews the scanned pages', () => {
+  it('previews the scanned pages', async () => {
     create()
     expect(component.previewSrc()).toBeNull()
     scannerService.startScan.mockReturnValue(of(job({ id: 'j1' })))
@@ -298,6 +339,14 @@ describe('ScanDialogComponent', () => {
 
     component.togglePreview(3)
     fixture.detectChanges()
+    // Thumbnails load as they scroll into view.
+    expect(
+      fixture.nativeElement.querySelectorAll('pngx-pdf-viewer').length
+    ).toBe(1)
+    const thumbnails = await fixture.getDeferBlocks()
+    expect(thumbnails.length).toBe(3)
+    for (const thumbnail of thumbnails)
+      await thumbnail.render(DeferBlockState.Complete)
     expect(
       fixture.nativeElement.querySelectorAll('pngx-pdf-viewer').length
     ).toBe(4)

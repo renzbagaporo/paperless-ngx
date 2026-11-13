@@ -9,7 +9,18 @@ import {
 import { FormsModule } from '@angular/forms'
 import { NgbActiveModal, NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
-import { Subject, Subscription, switchMap, takeWhile, timer } from 'rxjs'
+import {
+  Subject,
+  Subscription,
+  catchError,
+  exhaustMap,
+  filter,
+  of,
+  takeUntil,
+  takeWhile,
+  throwError,
+  timer,
+} from 'rxjs'
 import {
   ScanColorMode,
   ScanJob,
@@ -114,6 +125,8 @@ export class ScanDialogComponent implements OnInit, OnDestroy {
 
   private poll: Subscription | null = null
   private unsubscribe = new Subject<void>()
+  /** Set once the dialog has let go of its server-side jobs. */
+  private closed = false
 
   readonly scanning = computed(() => this.job()?.status === 'scanning')
 
@@ -149,7 +162,7 @@ export class ScanDialogComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.poll?.unsubscribe()
+    this.discardJobs()
     this.unsubscribe.next()
     this.unsubscribe.complete()
   }
@@ -247,6 +260,11 @@ export class ScanDialogComponent implements OnInit, OnDestroy {
       })
       .subscribe({
         next: (job) => {
+          if (this.closed) {
+            // The dialog closed while the scan was starting.
+            this.scannerService.deleteJob(job.id).subscribe({ error: () => {} })
+            return
+          }
           this.job.set(job)
           this.pollJob(job.id)
         },
@@ -263,8 +281,19 @@ export class ScanDialogComponent implements OnInit, OnDestroy {
     this.poll?.unsubscribe()
     this.poll = timer(POLL_INTERVAL_MS, POLL_INTERVAL_MS)
       .pipe(
-        switchMap(() => this.scannerService.getJob(jobId)),
-        takeWhile((job) => job.status === 'scanning', true)
+        // Wait for a slow answer rather than cancelling it.
+        exhaustMap(() =>
+          this.scannerService.getJob(jobId).pipe(
+            // The scan carries on at the server through a dropped request;
+            // only a missing job ends the polling.
+            catchError((e) =>
+              e?.status === 404 ? throwError(() => e) : of(null)
+            )
+          )
+        ),
+        filter((job): job is ScanJob => job !== null),
+        takeWhile((job) => job.status === 'scanning', true),
+        takeUntil(this.unsubscribe)
       )
       .subscribe({
         next: (job) => {
@@ -333,9 +362,7 @@ export class ScanDialogComponent implements OnInit, OnDestroy {
     this.finishing.set(true)
     this.scannerService.getFile(finished.id).subscribe({
       next: (blob) => {
-        this.scannerService
-          .deleteJob(finished.id)
-          .subscribe({ error: () => {} })
+        this.discardJobs()
         this.activeModal.close(
           new File([blob], this.fileName(), { type: 'application/pdf' })
         )
@@ -353,12 +380,19 @@ export class ScanDialogComponent implements OnInit, OnDestroy {
   }
 
   cancel() {
+    this.discardJobs()
+    this.activeModal.dismiss()
+  }
+
+  /** Cancel a running scan and remove scanned pages from the server, once. */
+  private discardJobs() {
+    if (this.closed) return
+    this.closed = true
     this.poll?.unsubscribe()
     for (const job of [this.job(), this.finishedJob()]) {
       if (job?.id)
         this.scannerService.deleteJob(job.id).subscribe({ error: () => {} })
     }
-    this.activeModal.dismiss()
   }
 
   private fileName(): string {

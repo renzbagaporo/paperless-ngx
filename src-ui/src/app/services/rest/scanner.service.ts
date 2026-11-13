@@ -13,7 +13,7 @@ export interface ScanSource {
   resolutions: number[]
   max_width: number
   max_height: number
-  pdf: boolean
+  formats: string[]
 }
 
 export interface Scanner {

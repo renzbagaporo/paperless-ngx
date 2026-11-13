@@ -147,6 +147,8 @@ export class UploadFileWidgetComponent extends ComponentWithPermissions {
   public scanDocument() {
     const modal = this.modalService.open(ScanDialogComponent, {
       backdrop: 'static',
+      // Escape would close the dialog with its scan still running.
+      keyboard: false,
       size: 'lg',
     })
     modal.componentInstance.title = $localize`Scan a new document`

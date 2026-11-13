@@ -36,8 +36,11 @@ CAPABILITIES = f"""<?xml version='1.0' encoding='UTF-8'?>
 <scan:YResolution>150</scan:YResolution></scan:DiscreteResolution>
 <scan:DiscreteResolution><scan:XResolution>300</scan:XResolution>
 <scan:YResolution>300</scan:YResolution></scan:DiscreteResolution>
+<scan:DiscreteResolution><scan:XResolution>1200</scan:XResolution>
+<scan:YResolution>1200</scan:YResolution></scan:DiscreteResolution>
 </scan:DiscreteResolutions></scan:SupportedResolutions>
 <scan:DocumentFormats><pwg:DocumentFormat>application/pdf</pwg:DocumentFormat>
+<pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>
 </scan:DocumentFormats>
 </scan:SettingProfile></scan:SettingProfiles>
 </scan:AdfSimplexInputCaps>
@@ -77,11 +80,22 @@ FLATBED_CAPABILITIES = b"""<?xml version='1.0' encoding='UTF-8'?>
 """
 
 
-def _status(adf_state: str = "ScannerAdfLoaded", state: str = "Idle") -> bytes:
+def _status(
+    adf_state: str = "ScannerAdfLoaded",
+    state: str = "Idle",
+    job_state: str = "Completed",
+    job_reason: str = "JobCompletedSuccessfully",
+) -> bytes:
     return f"""<?xml version='1.0' encoding='UTF-8'?>
 <scan:ScannerStatus xmlns:pwg='http://www.pwg.org/schemas/2010/12/sm'
     xmlns:scan='http://schemas.hp.com/imaging/escl/2011/05/03'>
 <pwg:State>{state}</pwg:State><scan:AdfState>{adf_state}</scan:AdfState>
+<scan:Jobs><scan:JobInfo>
+<pwg:JobUri>/{DEVICE_UUID}/ScanJobs/1234</pwg:JobUri>
+<pwg:JobState>{job_state}</pwg:JobState>
+<pwg:JobStateReasons><pwg:JobStateReason>{job_reason}</pwg:JobStateReason>
+</pwg:JobStateReasons>
+</scan:JobInfo></scan:Jobs>
 </scan:ScannerStatus>""".encode()
 
 
@@ -167,7 +181,8 @@ class TestScannerList:
         feeder = scanner["sources"][0]
         assert feeder["color_modes"] == ["color", "grayscale"]
         assert feeder["resolutions"] == [150, 300]
-        assert feeder["pdf"] is True
+        assert feeder["formats"] == ["application/pdf", "image/jpeg"]
+        assert scanner["sources"][1]["formats"] == ["application/pdf"]
 
     def test_newly_published_device_appears(
         self,
@@ -195,7 +210,7 @@ class TestScannerList:
         assert set(names) == {"EPSON DS-571W", "EPSON GT-S660"}
         flatbed = names["EPSON GT-S660"]["sources"]
         assert [s["id"] for s in flatbed] == ["flatbed"]
-        assert flatbed[0]["pdf"] is False
+        assert flatbed[0]["formats"] == ["image/jpeg"]
 
     def test_direct_device_url(
         self,
@@ -231,6 +246,22 @@ class TestScannerList:
         assert scanner["name"] == "airsane.test"
         assert scanner["error"] == "The scanner is not reachable."
 
+    def test_unreachable_server_is_not_retried_at_once(
+        self,
+        admin_client: APIClient,
+        scanner_settings: Settings,
+        httpx_mock: HTTPXMock,
+    ) -> None:
+        import httpx
+
+        httpx_mock.add_exception(httpx.ConnectError("refused"), url=SERVER)
+
+        admin_client.get("/api/scanners/")
+        [scanner] = admin_client.get("/api/scanners/").data
+
+        assert scanner["available"] is False
+        assert len(httpx_mock.get_requests(url=SERVER)) == 1
+
     def test_requires_document_permission(
         self,
         user_client: APIClient,
@@ -260,7 +291,11 @@ class TestScanJobs:
         scanner_settings: Settings,
         airsane: HTTPXMock,
     ) -> None:
-        airsane.add_response(url=f"{DEVICE}ScannerStatus", content=_status())
+        airsane.add_response(
+            url=f"{DEVICE}ScannerStatus",
+            content=_status(),
+            is_reusable=True,
+        )
         airsane.add_response(
             url=f"{DEVICE}ScanJobs",
             method="POST",
@@ -295,13 +330,13 @@ class TestScanJobs:
         assert "<scan:Duplex>false</scan:Duplex>" in settings_sent
         assert "<scan:ColorMode>Grayscale8</scan:ColorMode>" in settings_sent
         assert "<pwg:Width>2480</pwg:Width>" in settings_sent
-        assert (
-            "<pwg:DocumentFormat>application/pdf</pwg:DocumentFormat>" in settings_sent
-        )
+        # JPEG pages stay compressed; AirSane's PDF pages are raw images.
+        assert "<pwg:DocumentFormat>image/jpeg</pwg:DocumentFormat>" in settings_sent
 
         file_response = admin_client.get(f"/api/scan_jobs/{job['id']}/file/")
         assert file_response.status_code == 200
         assert file_response["Content-Type"] == "application/pdf"
+        assert file_response["Cache-Control"] == "private, max-age=3600"
         pdf = pikepdf.Pdf.open(io.BytesIO(b"".join(file_response.streaming_content)))
         assert len(pdf.pages) == 3
 
@@ -311,7 +346,11 @@ class TestScanJobs:
         scanner_settings: Settings,
         airsane: HTTPXMock,
     ) -> None:
-        airsane.add_response(url=f"{DEVICE}ScannerStatus", content=_status())
+        airsane.add_response(
+            url=f"{DEVICE}ScannerStatus",
+            content=_status(),
+            is_reusable=True,
+        )
         airsane.add_response(
             url=f"{DEVICE}ScanJobs",
             method="POST",
@@ -342,6 +381,15 @@ class TestScanJobs:
         settings_sent = airsane.get_request(url=f"{DEVICE}ScanJobs").content.decode()
         assert "<scan:Duplex>true</scan:Duplex>" in settings_sent
         assert "<pwg:Height>4200</pwg:Height>" in settings_sent
+        # The duplex feeder offers only PDF.
+        assert (
+            "<pwg:DocumentFormat>application/pdf</pwg:DocumentFormat>" in settings_sent
+        )
+        # The image is laid out at the scan resolution: 40 x 60 px at 300 dpi.
+        pdf = pikepdf.Pdf.open(scanning._job_dir(job["id"]) / "scan.pdf")
+        assert [round(float(v), 1) for v in pdf.pages[0].mediabox[2:]] == [9.6, 14.4]
+        pdf.close()
+        assert not list(scanning._job_dir(job["id"]).glob("page-*"))
 
     def test_unsupported_option_is_rejected(
         self,
@@ -370,7 +418,11 @@ class TestScanJobs:
         source: str,
         pages_kept: int,
     ) -> None:
-        airsane.add_response(url=f"{DEVICE}ScannerStatus", content=_status())
+        airsane.add_response(
+            url=f"{DEVICE}ScannerStatus",
+            content=_status(),
+            is_reusable=True,
+        )
         airsane.add_response(
             url=f"{DEVICE}ScanJobs",
             method="POST",
@@ -410,6 +462,7 @@ class TestScanJobs:
         airsane.add_response(
             url=f"{DEVICE}ScannerStatus",
             content=_status("ScannerAdfEmpty"),
+            is_reusable=True,
         )
         airsane.add_response(
             url=f"{DEVICE}ScanJobs",
@@ -428,13 +481,99 @@ class TestScanJobs:
 
         assert _wait_for(admin_client, response.data["id"])["status"] == "done"
 
-    def test_no_pages_returned(
+    def test_batch_broken_off_is_not_done(
         self,
         admin_client: APIClient,
         scanner_settings: Settings,
         airsane: HTTPXMock,
     ) -> None:
         airsane.add_response(url=f"{DEVICE}ScannerStatus", content=_status())
+        airsane.add_response(
+            url=f"{DEVICE}ScanJobs",
+            method="POST",
+            status_code=201,
+            headers={"Location": JOB},
+        )
+        airsane.add_response(url=f"{JOB}/NextDocument", content=_pdf())
+        airsane.add_response(url=f"{JOB}/NextDocument", status_code=503)
+        airsane.add_response(url=f"{JOB}/NextDocument", status_code=404)
+        airsane.add_response(
+            url=f"{DEVICE}ScannerStatus",
+            content=_status(
+                job_state="Aborted",
+                job_reason="ResourcesAreNotReady",
+            ),
+        )
+
+        response = admin_client.post(
+            f"/api/scanners/{_scanner_id()}/scan/",
+            SCAN_REQUEST,
+            format="json",
+        )
+
+        job = _wait_for(admin_client, response.data["id"])
+        assert job["status"] == "failed"
+        assert job["error"] == (
+            "The scanner stopped after 1 page(s) without finishing "
+            "(Aborted: ResourcesAreNotReady). Check the scanner for a jam or "
+            "error, then scan again."
+        )
+
+    def test_sheet_limit_counts_pages_in_a_document(
+        self,
+        admin_client: APIClient,
+        scanner_settings: Settings,
+        airsane: HTTPXMock,
+    ) -> None:
+        airsane.add_response(url=f"{DEVICE}ScannerStatus", content=_status())
+        airsane.add_response(
+            url=f"{DEVICE}ScanJobs",
+            method="POST",
+            status_code=201,
+            headers={"Location": JOB},
+        )
+        airsane.add_response(url=f"{JOB}/NextDocument", content=_pdf(2))
+        airsane.add_response(url=JOB, method="DELETE")
+
+        response = admin_client.post(
+            f"/api/scanners/{_scanner_id()}/scan/",
+            {**SCAN_REQUEST, "max_sheets": 2},
+            format="json",
+        )
+
+        job = _wait_for(admin_client, response.data["id"])
+        assert job["status"] == "done"
+        assert job["pages"] == 2
+
+    def test_resolution_above_cap_is_rejected(
+        self,
+        admin_client: APIClient,
+        scanner_settings: Settings,
+        airsane: HTTPXMock,
+    ) -> None:
+        [scanner] = admin_client.get("/api/scanners/").data
+        assert scanner["sources"][0]["resolutions"] == [150, 300]
+
+        response = admin_client.post(
+            f"/api/scanners/{_scanner_id()}/scan/",
+            {**SCAN_REQUEST, "resolution": 1200},
+            format="json",
+        )
+
+        assert response.status_code == 400
+        assert "resolution" in response.data
+
+    def test_no_pages_returned(
+        self,
+        admin_client: APIClient,
+        scanner_settings: Settings,
+        airsane: HTTPXMock,
+    ) -> None:
+        airsane.add_response(
+            url=f"{DEVICE}ScannerStatus",
+            content=_status(),
+            is_reusable=True,
+        )
         airsane.add_response(
             url=f"{DEVICE}ScanJobs",
             method="POST",
@@ -500,7 +639,11 @@ class TestScanJobs:
         scanner_settings: Settings,
         airsane: HTTPXMock,
     ) -> None:
-        airsane.add_response(url=f"{DEVICE}ScannerStatus", content=_status())
+        airsane.add_response(
+            url=f"{DEVICE}ScannerStatus",
+            content=_status(),
+            is_reusable=True,
+        )
         airsane.add_response(
             url=f"{DEVICE}ScanJobs",
             method="POST",
@@ -530,7 +673,11 @@ class TestScanJobs:
     ) -> None:
         user_client = APIClient()
         user_client.force_authenticate(user=regular_user)
-        airsane.add_response(url=f"{DEVICE}ScannerStatus", content=_status())
+        airsane.add_response(
+            url=f"{DEVICE}ScannerStatus",
+            content=_status(),
+            is_reusable=True,
+        )
         airsane.add_response(
             url=f"{DEVICE}ScanJobs",
             method="POST",
@@ -609,7 +756,11 @@ class TestScanJobs:
         assert response.data["error"] == "The earlier scan is no longer available."
 
     def _finished_scan(self, client: APIClient, airsane: HTTPXMock, pages: int) -> str:
-        airsane.add_response(url=f"{DEVICE}ScannerStatus", content=_status())
+        airsane.add_response(
+            url=f"{DEVICE}ScannerStatus",
+            content=_status(),
+            is_reusable=True,
+        )
         airsane.add_response(
             url=f"{DEVICE}ScanJobs",
             method="POST",
@@ -734,3 +885,30 @@ def test_expired_jobs_are_purged(scanner_settings: Settings) -> None:
 
     assert not old.exists()
     assert fresh.exists()
+
+
+def test_capabilities_with_resolution_range_and_odd_sizes() -> None:
+    caps = scanning.parse_capabilities(
+        b"""<?xml version='1.0' encoding='UTF-8'?>
+<scan:ScannerCapabilities xmlns:pwg='http://www.pwg.org/schemas/2010/12/sm'
+    xmlns:scan='http://schemas.hp.com/imaging/escl/2011/05/03'>
+<pwg:MakeAndModel>Office Scanner</pwg:MakeAndModel>
+<scan:Platen><scan:PlatenInputCaps>
+<scan:MaxWidth>2550.0</scan:MaxWidth><scan:MaxHeight>n/a</scan:MaxHeight>
+<scan:SettingProfiles><scan:SettingProfile>
+<scan:ColorModes><scan:ColorMode>RGB24</scan:ColorMode></scan:ColorModes>
+<scan:SupportedResolutions><scan:ResolutionRange>
+<scan:XResolutionRange><scan:Min>100</scan:Min><scan:Max>1200</scan:Max>
+</scan:XResolutionRange>
+<scan:YResolutionRange><scan:Min>100</scan:Min><scan:Max>1200</scan:Max>
+</scan:YResolutionRange>
+</scan:ResolutionRange></scan:SupportedResolutions>
+</scan:SettingProfile></scan:SettingProfiles>
+</scan:PlatenInputCaps></scan:Platen>
+</scan:ScannerCapabilities>""",
+    )
+
+    [flatbed] = caps["sources"]
+    assert flatbed["resolutions"] == [100, 150, 200, 300, 400, 600]
+    assert flatbed["max_width"] == 2550
+    assert flatbed["max_height"] == 0

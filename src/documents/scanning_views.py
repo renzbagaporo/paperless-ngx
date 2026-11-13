@@ -26,7 +26,10 @@ def _require_scan_permission(request) -> None:
 class StartScanSerializer(serializers.Serializer[dict[str, Any]]):
     source = serializers.ChoiceField(choices=list(scanning.SOURCES))
     color_mode = serializers.ChoiceField(choices=list(scanning.COLOR_MODES))
-    resolution = serializers.IntegerField(min_value=1, max_value=4800)
+    resolution = serializers.IntegerField(
+        min_value=1,
+        max_value=scanning.MAX_RESOLUTION,
+    )
     paper_size = serializers.ChoiceField(choices=list(scanning.PAPER_SIZES))
     max_sheets = serializers.IntegerField(
         min_value=1,
@@ -128,12 +131,16 @@ class ScanJobFileView(GenericAPIView[Any]):
         path = scanning.job_file(job_id, request.user.id)
         if path is None or not path.exists():
             raise Http404
-        return FileResponse(
+        response = FileResponse(
             path.open("rb"),
             content_type="application/pdf",
             as_attachment=False,
             filename=f"scan-{job_id[:8]}.pdf",
         )
+        # The dialog shows every page from the same URL, which changes with
+        # each edit (?revision=), so the browser can load the file once.
+        response["Cache-Control"] = "private, max-age=3600"
+        return response
 
 
 @extend_schema(
