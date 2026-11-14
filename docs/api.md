@@ -347,11 +347,11 @@ The schema migration only creates the page-data table; it does not change
 documents, files or searchable content and does not invoke OCR. A local backfill
 recovers text from existing searchable PDFs, including retained file versions.
 It cannot recover the discarded Markdown or layout. Preview first, then apply
-inside the Paperless runtime:
+inside the Paperless container, which runs the command as the Paperless user:
 
 ```sh
-python manage.py document_page_data backfill
-python manage.py document_page_data backfill --apply
+docker compose exec webserver document_page_data backfill
+docker compose exec webserver document_page_data backfill --apply
 ```
 
 Backfill is resumable, skips complete current records, checks file checksums and
@@ -366,8 +366,8 @@ content from the retained page records. Preview the missing page count before
 explicitly authorizing a bounded number of paid pages:
 
 ```sh
-python manage.py document_page_data enrich
-python manage.py document_page_data enrich --apply --max-pages 10
+docker compose exec webserver document_page_data enrich
+docker compose exec webserver document_page_data enrich --apply --max-pages 10
 ```
 
 Enrichment uses the configured LlamaParse engine and key. It saves each success

@@ -17,3 +17,8 @@ RUN PERSONAL_RELEASE="${PERSONAL_RELEASE}" python3 -c 'import os; from pathlib i
 COPY --chown=1000:1000 pyproject.toml uv.lock ./
 COPY --from=compile-frontend --chown=1000:1000 /src/src/documents/static/frontend/ ./documents/static/frontend/
 RUN PAPERLESS_SECRET_KEY=build-time-dummy python3 manage.py collectstatic --clear --no-input --link
+# Wrappers that run management commands as the paperless user, including the
+# fork's own commands.
+COPY docker/rootfs/usr/local/bin/ /usr/local/bin/
+# Any manage.py started as root from here on re-runs as the paperless user.
+ENV PAPERLESS_MANAGE_USER=paperless

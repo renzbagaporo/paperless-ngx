@@ -47,7 +47,20 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - name: Build image for checks
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile.custom
+          build-args: |
+            PERSONAL_RELEASE=${{ needs.verify.outputs.tag }}
+          load: true
+          tags: personal-release-check
+          cache-from: type=gha,scope=personal-release
+      - name: Check that commands started as root run as paperless
+        run: .github/scripts/check_image_user.sh personal-release-check
+      - name: Publish image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: Dockerfile.custom

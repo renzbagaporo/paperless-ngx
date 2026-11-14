@@ -125,7 +125,8 @@ jobs:
             src/paperless/tests/test_registry.py \
             src/paperless/tests/test_remote_ocr_config.py \
             src/paperless/tests/settings/test_custom_parsers.py \
-            src/paperless/tests/test_personal_version.py
+            src/paperless/tests/test_personal_version.py \
+            src/paperless/tests/test_command_wrappers.py
       - name: Test native import and export in a separate process
         if: matrix.database == 'sqlite'
         # The CLI importer disables process-global audit receivers for its import.

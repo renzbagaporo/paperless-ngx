@@ -53,16 +53,18 @@ digital PDFs that keep their existing text are tagged **ocr-skip**. The local
 orientation check honors Paperless's rotation setting and confidence threshold.
 Review warnings about numbers use **ocr-review** and private notes.
 
-The management command previews saved pending work without making OCR requests:
+The management command previews saved pending work without making OCR requests.
+In the container, run it through its wrapper, which runs as the Paperless user;
+`webserver` is the Compose service name:
 
 ```sh
-python3 src/manage.py document_ocr
+docker compose exec webserver document_ocr
 ```
 
 An explicit page budget is required to retry from the command line:
 
 ```sh
-python3 src/manage.py document_ocr \
+docker compose exec webserver document_ocr \
   --apply --max-pages 10
 ```
 
@@ -116,7 +118,7 @@ Status tags are global unless explicitly mapped to existing helper-owned tags.
 For an installation that used the external helper, inspect its API user's tags:
 
 ```sh
-python3 src/manage.py document_ocr \
+docker compose exec webserver document_ocr \
   --legacy-helper-owner 12
 ```
 
